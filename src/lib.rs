@@ -17,6 +17,7 @@ const ICON_512: &[u8] = include_bytes!("../public/icon-512.png");
 const SCREENSHOT_WIDE: &[u8] = include_bytes!("../public/screenshot-wide.png");
 const SCREENSHOT_NARROW: &[u8] = include_bytes!("../public/screenshot-narrow.png");
 const FAVICON: &[u8] = include_bytes!("../public/favicon.png");
+const LOGO: &[u8] = include_bytes!("../public/logo.png");
 
 fn serve_static(content: &str, content_type: &str) -> Result<Response> {
     let headers = Headers::new();
