@@ -498,7 +498,28 @@ button:hover {
 .toastui-editor-defaultUI .toastui-editor-main {
   background: var(--color-surface) !important;
 }
+.toastui-editor-defaultUI .toastui-editor-main .toastui-editor-md-container,
+.toastui-editor-defaultUI .toastui-editor-main .toastui-editor-md-preview,
+.ProseMirror {
+  color: var(--color-text) !important;
+}
 .toastui-editor-contents {
   font-size: 0.9rem;
   font-family: inherit !important;
+  color: var(--color-text) !important;
+}
+.toastui-editor-contents p,
+.toastui-editor-contents h1,
+.toastui-editor-contents h2,
+.toastui-editor-contents h3,
+.toastui-editor-contents h4,
+.toastui-editor-contents h5,
+.toastui-editor-contents h6,
+.toastui-editor-contents ul,
+.toastui-editor-contents ol,
+.toastui-editor-contents li {
+  color: var(--color-text) !important;
+}
+.toastui-editor-md-preview {
+  color: var(--color-text) !important;
 }
