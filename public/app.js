@@ -191,7 +191,19 @@ function renderTopicTabs() {
 function renderMessages() {
   const msgs = state.messages[state.activeTopic] || [];
   if (msgs.length === 0) {
-    messagesList.innerHTML = '<p style="color:#94a3b8;text-align:center;padding:2rem">No messages yet. Send one with curl!</p>';
+    messagesList.innerHTML = `
+      <div class="empty-state">
+        <svg class="empty-state-icon" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="12" y="24" width="56" height="36" rx="4" stroke="currentColor" stroke-width="2"/>
+          <path d="M12 28l28 18 28-18" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="62" cy="22" r="8" fill="#7a8b5c" opacity="0.2" stroke="#7a8b5c" stroke-width="2"/>
+          <path d="M59 22l2 2 4-4" stroke="#7a8b5c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <p class="empty-state-title">Listening for messages</p>
+        <p class="empty-state-hint">Use the compose area below or send one via HTTP:</p>
+        <code class="empty-state-cmd">curl -d "Hello!" ${location.origin}/${state.activeTopic}</code>
+      </div>
+    `;
     return;
   }
 
@@ -200,10 +212,13 @@ function renderMessages() {
       const time = new Date(msg.created_at * 1000).toLocaleTimeString();
       const title = msg.title || msg.topic;
       const tags = msg.tags ? `<div class="msg-tags">${msg.tags}</div>` : '';
+      const priorityLabel = msg.priority >= 3
+        ? `<span class="msg-priority-badge">P${msg.priority}</span>`
+        : '';
       return `
         <div class="message-card priority-${msg.priority}">
           <div class="msg-header">
-            <span class="msg-title">${escapeHtml(title)}</span>
+            <span class="msg-title">${escapeHtml(title)}${priorityLabel}</span>
             <span class="msg-time">${time}</span>
           </div>
           <div class="msg-body">${msg.markdown ? renderMarkdown(msg.message) : escapeHtml(msg.message)}</div>
