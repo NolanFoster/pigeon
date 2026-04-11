@@ -3,7 +3,7 @@ main = "build/worker/shim.mjs"
 compatibility_date = "2024-12-01"
 
 [build]
-command = "worker-build --release"
+command = "cargo install worker-build && worker-build --release"
 
 [vars]
 VAPID_SUBJECT = "mailto:nolanfoster@gmail.com"
