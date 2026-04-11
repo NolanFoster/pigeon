@@ -1,0 +1,7 @@
+target/
+build/
+.wrangler/
+node_modules/
+.dev.vars
+*.wasm
+*.pem

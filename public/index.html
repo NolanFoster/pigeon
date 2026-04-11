@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pigeon</title>
+  <link rel="icon" type="image/png" href="/favicon.png">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Pigeon</h1>
+      <p class="subtitle">Push notifications, simple as HTTP</p>
+    </header>
+
+    <section class="subscribe-form">
+      <div class="input-group">
+        <input type="text" id="topic-input" placeholder="Topic name" autocomplete="off">
+        <button id="subscribe-btn">Subscribe</button>
+      </div>
+    </section>
+
+    <section id="topics-section" class="topics" hidden>
+      <div class="topics-header">
+        <h2>Subscribed Topics</h2>
+        <button id="enable-push-btn" class="push-btn">Enable Push Notifications</button>
+      </div>
+      <div id="topic-tabs" class="topic-tabs"></div>
+    </section>
+
+    <section id="messages-section" class="messages" hidden>
+      <div class="messages-header">
+        <button id="clear-messages-btn" class="clear-btn">Clear</button>
+      </div>
+      <div id="messages-list" class="messages-list"></div>
+      <div class="compose">
+        <input type="text" id="compose-title" placeholder="Title (optional)" autocomplete="off">
+        <div class="compose-body-row">
+          <textarea id="compose-message" placeholder="Message" rows="2"></textarea>
+          <button id="send-btn">Send</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="usage">
+      <h2>Send a message</h2>
+      <pre><code>curl -d "Hello!" https://your-worker.dev/mytopic</code></pre>
+      <p>With title and priority:</p>
+      <pre><code>curl -H "X-Title: Alert" -H "X-Priority: 5" \
+     -d "Server is down!" https://your-worker.dev/mytopic</code></pre>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

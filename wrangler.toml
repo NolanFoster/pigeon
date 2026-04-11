@@ -1,0 +1,24 @@
+name = "pigeon"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-12-01"
+
+[build]
+command = "worker-build --release"
+
+[vars]
+VAPID_SUBJECT = "mailto:nolanfoster@gmail.com"
+VAPID_PUBLIC_KEY = "BIXUiAX4PJNjwJMTrFBN_HunYTLdTW514wbHUct-tTwHFvs1ljKb7kVPbIdNanJUL4SsIUe9z_H4MSkSJkKgD0I"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "pigeon-db"
+database_id = "9f2346e9-5dd0-46f8-ba6c-0bed8a26ce33"
+
+[durable_objects]
+bindings = [
+  { name = "TOPIC_ROOM", class_name = "TopicRoom" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["TopicRoom"]
