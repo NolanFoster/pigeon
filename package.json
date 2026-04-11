@@ -1,0 +1,13 @@
+{
+  "name": "pigeon-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Frontend linting for Pigeon",
+  "scripts": {
+    "lint": "eslint public/*.js && htmlhint public/*.html"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "htmlhint": "^1.1.4"
+  }
+}

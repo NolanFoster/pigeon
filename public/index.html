@@ -10,6 +10,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="https://uicdn.toast.com/editor/latest/toastui-editor.min.css" />
+  <link rel="stylesheet" href="https://uicdn.toast.com/editor/latest/theme/toastui-editor-dark.min.css" />
 </head>
 <body>
   <div class="container">
@@ -41,7 +43,7 @@
       <div class="compose">
         <input type="text" id="compose-title" placeholder="Title (optional)" autocomplete="off">
         <div class="compose-editor">
-          <textarea id="compose-message" placeholder="Message" rows="2"></textarea>
+          <div id="compose-editor-container"></div>
         </div>
         <div class="compose-options" style="margin-top: 0.5rem; display: flex; align-items: center; justify-content: space-between; font-size: 0.9rem;">
           <div style="display: flex; align-items: center; gap: 0.5rem;">
@@ -69,7 +71,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.js"></script>
+  <script src="https://uicdn.toast.com/editor/latest/toastui-editor-all.min.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -1,0 +1,19 @@
+{
+  "env": {
+    "browser": true,
+    "es2021": true,
+    "serviceworker": true
+  },
+  "extends": "eslint:recommended",
+  "parserOptions": {
+    "ecmaVersion": 12
+  },
+  "globals": {
+    "toastui": "readonly",
+    "marked": "readonly"
+  },
+  "rules": {
+    "no-unused-vars": "off",
+    "no-empty": "off"
+  }
+}

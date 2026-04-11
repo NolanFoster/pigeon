@@ -165,10 +165,6 @@ function selectTopic(topic) {
   messagesSection.hidden = false;
   renderTopicTabs();
   renderMessages();
-  
-  if (typeof easymde !== 'undefined' && easymde) {
-    setTimeout(() => easymde.codemirror.refresh(), 100);
-  }
 }
 
 function removeTopic(topic) {
@@ -259,30 +255,37 @@ function renderMessages() {
 
 // Send message from compose form
 const composeTitle = document.getElementById('compose-title');
-const composeMessage = document.getElementById('compose-message');
 const composePriority = document.getElementById('compose-priority');
 const sendBtn = document.getElementById('send-btn');
 
-let easymde = null;
-if (typeof EasyMDE !== 'undefined') {
-  easymde = new EasyMDE({
-    element: composeMessage,
-    spellChecker: false,
-    status: false,
-    minHeight: '80px',
+let editor = null;
+if (typeof toastui !== 'undefined' && toastui.Editor) {
+  const isDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  editor = new toastui.Editor({
+    el: document.querySelector('#compose-editor-container'),
+    height: '150px',
+    initialEditType: 'markdown',
+    previewStyle: 'tab',
+    theme: isDarkMode ? 'dark' : 'light',
+    hideModeSwitch: true,
+    toolbarItems: [
+      ['heading', 'bold', 'italic', 'strike'],
+      ['hr', 'quote'],
+      ['ul', 'ol', 'task', 'indent', 'outdent'],
+      ['table', 'image', 'link'],
+      ['code', 'codeblock']
+    ]
   });
-  easymde.codemirror.on('keydown', (cm, e) => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      sendMessage();
-    }
+
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', event => {
+    // Basic reload for theme updates could be done, or dynamically swap classes
   });
 }
 
 sendBtn.addEventListener('click', sendMessage);
 
 async function sendMessage() {
-  const body = easymde ? easymde.value().trim() : composeMessage.value.trim();
+  const body = editor ? editor.getMarkdown().trim() : '';
   if (!body || !state.activeTopic) return;
 
   const headers = {};
@@ -298,8 +301,7 @@ async function sendMessage() {
       headers,
       body,
     });
-    if (easymde) easymde.value('');
-    else composeMessage.value = '';
+    if (editor) editor.setMarkdown('');
     composeTitle.value = '';
   } catch (err) {
     console.error('Send failed:', err);

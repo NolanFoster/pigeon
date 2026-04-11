@@ -477,42 +477,19 @@ button:hover {
   .topics-header { flex-direction: column; gap: 0.5rem; align-items: flex-start; }
 }
 
-/* EasyMDE Dark Mode & Integrations */
-.compose-editor .editor-toolbar {
-  border-color: var(--color-border);
-  background: var(--color-surface);
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
-  opacity: 1;
-}
-.compose-editor .editor-toolbar button {
-  color: var(--color-text);
-  border: none;
-  background: transparent;
-}
-.compose-editor .editor-toolbar button.active, .compose-editor .editor-toolbar button:hover {
-  background: var(--color-tab-bg);
-  border-color: var(--color-border);
-}
-.compose-editor .editor-toolbar i.separator {
-  border-right: 1px solid var(--color-border);
-  border-left: none;
-}
-.compose-editor .CodeMirror {
-  border-color: var(--color-border);
-  border-radius: 0 0 var(--radius-md) var(--radius-md);
-  background: var(--color-surface);
-  color: var(--color-text);
+/* Toast UI Editor custom tweaks */
+.toastui-editor-defaultUI {
+  border: 1px solid var(--color-border) !important;
+  border-radius: var(--radius-md);
   font-family: inherit;
+}
+.toastui-editor-defaultUI .toastui-editor-toolbar {
+  background: var(--color-surface) !important;
+}
+.toastui-editor-defaultUI .toastui-editor-main {
+  background: var(--color-surface) !important;
+}
+.toastui-editor-contents {
   font-size: 0.9rem;
-  min-height: 80px;
-}
-.compose-editor .editor-preview {
-  background: var(--color-surface);
-  color: var(--color-text);
-}
-.compose-editor .editor-statusbar {
-  display: none;
-}
-.compose-editor .EasyMDEContainer {
-  width: 100%;
+  font-family: inherit !important;
 }
