@@ -484,6 +484,8 @@ button:hover {
 @media (max-width: 480px) {
   .container { padding: 1rem; }
   .topics-header { flex-direction: column; gap: 0.5rem; align-items: flex-start; }
+  .input-group { flex-direction: column; }
+  .input-group button { width: 100%; }
 }
 
 /* Toast UI Editor custom tweaks */
