@@ -55,7 +55,16 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         .with_headers(do_headers)
         .with_body(Some(JsValue::from_str(&broadcast_body)));
     let do_req = Request::new_with_init("https://do/broadcast", &do_init)?;
-    let _ = stub.fetch_with_request(do_req).await;
+    match stub.fetch_with_request(do_req).await {
+        Ok(resp) => {
+            if resp.status_code() != 200 {
+                console_log!("DO broadcast returned status {}", resp.status_code());
+            }
+        }
+        Err(e) => {
+            console_log!("DO broadcast failed: {:?}", e);
+        }
+    }
 
     // Send Web Push notifications (must await, not spawn_local)
     if let Err(e) = crate::webpush::send_push_to_topic(&ctx.env, &msg).await {

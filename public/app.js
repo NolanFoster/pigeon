@@ -2,7 +2,7 @@ const state = {
   topics: JSON.parse(localStorage.getItem('pigeon_topics') || '[]'),
   activeTopic: null,
   messages: {},       // topic -> Message[]
-  eventSources: {},   // topic -> WebSocket
+  eventSources: {},   // topic -> { ws, heartbeatId }
   pushEnabled: false,
   pushSubscription: null,
 };
@@ -29,6 +29,10 @@ async function init() {
       state.pushSubscription = existing;
       enablePushBtn.textContent = 'Push Enabled';
       enablePushBtn.classList.add('enabled');
+      // Re-register push for all topics (idempotent via INSERT OR REPLACE on server)
+      Promise.all(
+        state.topics.map(topic => registerPushForTopic(topic, existing))
+      ).catch(err => console.error('Push re-registration failed:', err));
     }
   }
 
@@ -50,6 +54,9 @@ subscribeBtn.addEventListener('click', () => {
   localStorage.setItem('pigeon_topics', JSON.stringify(state.topics));
 
   connectTopic(topic);
+  if (state.pushEnabled && state.pushSubscription) {
+    registerPushForTopic(topic, state.pushSubscription);
+  }
   selectTopic(topic);
   renderTopicTabs();
 
@@ -65,43 +72,74 @@ async function connectTopic(topic) {
   if (state.eventSources[topic]) return;
   state.messages[topic] = state.messages[topic] || [];
 
-  // Fetch existing messages first, before opening WebSocket
-  try {
-    const res = await fetch(`/${topic}/json?since=all`);
-    const msgs = await res.json();
-    state.messages[topic] = msgs.reverse();
-    if (state.activeTopic === topic) renderMessages();
-  } catch {}
-
-  // Now open WebSocket for live updates
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/${topic}/sse`);
+
+  // Buffer messages arriving before history is loaded
+  const earlyMessages = [];
+  let historyLoaded = false;
+
+  ws.onopen = async () => {
+    try {
+      const res = await fetch(`/${topic}/json?since=all`);
+      const msgs = await res.json();
+      state.messages[topic] = msgs.reverse();
+      // Merge any messages that arrived via WS while fetching history
+      for (const msg of earlyMessages) {
+        if (!state.messages[topic].some(m => m.id === msg.id)) {
+          state.messages[topic].unshift(msg);
+        }
+      }
+      historyLoaded = true;
+      if (state.activeTopic === topic) renderMessages();
+    } catch {}
+  };
 
   ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
-      // Deduplicate by message id
+      if (!historyLoaded) {
+        earlyMessages.push(msg);
+        return;
+      }
       if (state.messages[topic].some(m => m.id === msg.id)) return;
       state.messages[topic].unshift(msg);
-      if (state.activeTopic === topic) {
-        renderMessages();
-      }
+      if (state.activeTopic === topic) renderMessages();
     } catch {}
   };
 
-  ws.onclose = () => {
+  const reconnect = () => {
+    clearInterval(heartbeatId);
     delete state.eventSources[topic];
     setTimeout(() => {
       if (state.topics.includes(topic)) connectTopic(topic);
     }, 3000);
   };
 
-  state.eventSources[topic] = ws;
+  ws.onclose = reconnect;
+
+  ws.onerror = () => {
+    ws.close();
+  };
+
+  // Heartbeat: check connection every 30s
+  const heartbeatId = setInterval(() => {
+    if (!state.eventSources[topic]) {
+      clearInterval(heartbeatId);
+      return;
+    }
+    if (ws.readyState !== WebSocket.OPEN) {
+      reconnect();
+    }
+  }, 30000);
+
+  state.eventSources[topic] = { ws, heartbeatId };
 }
 
 function disconnectTopic(topic) {
   if (state.eventSources[topic]) {
-    state.eventSources[topic].close();
+    clearInterval(state.eventSources[topic].heartbeatId);
+    state.eventSources[topic].ws.close();
     delete state.eventSources[topic];
   }
   delete state.messages[topic];
@@ -221,6 +259,25 @@ clearMessagesBtn.addEventListener('click', () => {
   }
 });
 
+// Push notification helpers
+async function registerPushForTopic(topic, subscription) {
+  try {
+    await fetch(`/${topic}/push/subscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        endpoint: subscription.endpoint,
+        keys: {
+          p256dh: arrayBufferToBase64Url(subscription.getKey('p256dh')),
+          auth: arrayBufferToBase64Url(subscription.getKey('auth')),
+        },
+      }),
+    });
+  } catch (err) {
+    console.error(`Push registration failed for topic ${topic}:`, err);
+  }
+}
+
 // Push notification setup
 enablePushBtn.addEventListener('click', async () => {
   if (state.pushEnabled) return;
@@ -242,17 +299,7 @@ enablePushBtn.addEventListener('click', async () => {
 
     // Register subscription for all current topics
     for (const topic of state.topics) {
-      await fetch(`/${topic}/push/subscribe`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          endpoint: subscription.endpoint,
-          keys: {
-            p256dh: arrayBufferToBase64Url(subscription.getKey('p256dh')),
-            auth: arrayBufferToBase64Url(subscription.getKey('auth')),
-          },
-        }),
-      });
+      await registerPushForTopic(topic, subscription);
     }
 
     state.pushEnabled = true;
@@ -303,5 +350,30 @@ function arrayBufferToBase64Url(buffer) {
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
+
+// Re-fetch messages when tab becomes visible to catch anything missed while backgrounded
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible') return;
+  for (const topic of state.topics) {
+    const conn = state.eventSources[topic];
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) {
+      // Connection is dead, reconnect
+      if (conn) {
+        clearInterval(conn.heartbeatId);
+        conn.ws.close();
+        delete state.eventSources[topic];
+      }
+      connectTopic(topic);
+    } else {
+      // Connection alive, but re-fetch to catch missed messages
+      try {
+        const res = await fetch(`/${topic}/json?since=all`);
+        const msgs = await res.json();
+        state.messages[topic] = msgs.reverse();
+        if (state.activeTopic === topic) renderMessages();
+      } catch {}
+    }
+  }
+});
 
 init();
