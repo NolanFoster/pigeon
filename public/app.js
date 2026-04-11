@@ -212,9 +212,13 @@ function renderMessages() {
       const time = new Date(msg.created_at * 1000).toLocaleTimeString();
       const title = msg.title || msg.topic;
       const tags = msg.tags ? `<div class="msg-tags">${msg.tags}</div>` : '';
+<<<<<<< HEAD
       const priorityLabel = msg.priority >= 3
         ? `<span class="msg-priority-badge">P${msg.priority}</span>`
         : '';
+=======
+      const image = msg.image ? `<div class="msg-image"><img src="${escapeHtml(msg.image)}" alt="" loading="lazy"></div>` : '';
+>>>>>>> 66e24f6 (Add image support, message clearing, and Markdown compose toggle)
       return `
         <div class="message-card priority-${msg.priority}">
           <div class="msg-header">
@@ -222,6 +226,7 @@ function renderMessages() {
             <span class="msg-time">${time}</span>
           </div>
           <div class="msg-body">${msg.markdown ? renderMarkdown(msg.message) : escapeHtml(msg.message)}</div>
+          ${image}
           ${tags}
         </div>
       `;
@@ -267,11 +272,11 @@ async function sendMessage() {
 }
 
 // Clear messages for active topic
-clearMessagesBtn.addEventListener('click', () => {
-  if (state.activeTopic) {
-    state.messages[state.activeTopic] = [];
-    renderMessages();
-  }
+clearMessagesBtn.addEventListener('click', async () => {
+  if (!state.activeTopic) return;
+  await fetch(`/${state.activeTopic}/messages`, { method: 'DELETE' });
+  state.messages[state.activeTopic] = [];
+  renderMessages();
 });
 
 // Push notification helpers
@@ -333,6 +338,10 @@ function escapeHtml(str) {
 }
 
 function renderMarkdown(str) {
+  if (typeof marked !== 'undefined') {
+    return marked.parse(str);
+  }
+  
   let html = escapeHtml(str);
   // Code blocks: ```...```
   html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');

@@ -12,6 +12,8 @@ pub struct Message {
     pub tags: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub click: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
     pub markdown: bool,
     pub created_at: i64,
 }

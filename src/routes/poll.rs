@@ -23,3 +23,10 @@ pub async fn handle(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
 
     Response::from_json(&messages)
 }
+
+pub async fn delete(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let topic = ctx.param("topic").unwrap();
+    let d1 = ctx.env.d1("DB")?;
+    db::delete_messages(&d1, topic).await?;
+    Response::ok("deleted")
+}

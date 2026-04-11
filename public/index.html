@@ -41,6 +41,10 @@
           <textarea id="compose-message" placeholder="Message" rows="2"></textarea>
           <button id="send-btn">Send</button>
         </div>
+        <div class="compose-options" style="margin-top: 0.5rem; display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; color: #64748b;">
+          <input type="checkbox" id="compose-markdown">
+          <label for="compose-markdown">Markdown</label>
+        </div>
       </div>
     </section>
 
@@ -53,6 +57,7 @@
     </section>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -70,6 +70,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .post_async("/:topic", routes::publish::handle)
         .get_async("/:topic/json", routes::poll::handle)
         .get_async("/:topic/sse", routes::subscribe::handle)
+        .delete_async("/:topic/messages", routes::poll::delete)
         .post_async("/:topic/push/subscribe", routes::push::subscribe)
         .delete_async("/:topic/push/subscribe", routes::push::unsubscribe)
         .run(req, env)

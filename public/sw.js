@@ -49,6 +49,7 @@ self.addEventListener('push', (event) => {
     tag: data.id || undefined,
     icon: '/icon-192.png',
     badge: '/icon-192.png',
+    image: data.image || undefined,
     data: { click: data.click, topic: data.topic },
   };
 

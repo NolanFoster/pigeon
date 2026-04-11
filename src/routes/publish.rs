@@ -18,6 +18,7 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         .unwrap_or(3);
     let tags = headers.get("X-Tags")?.or(headers.get("Tags")?);
     let click = headers.get("X-Click")?.or(headers.get("Click")?);
+    let image = headers.get("X-Image")?.or(headers.get("Image")?);
     let markdown = headers
         .get("X-Markdown")?
         .or(headers.get("Markdown")?)
@@ -34,6 +35,7 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         priority,
         tags,
         click,
+        image,
         markdown,
         created_at: now as i64,
     };

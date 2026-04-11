@@ -296,6 +296,17 @@ button:hover {
   color: var(--color-primary);
 }
 
+.msg-image {
+  margin-top: 0.5rem;
+}
+
+.msg-image img {
+  max-width: 100%;
+  border-radius: 6px;
+  max-height: 300px;
+  object-fit: contain;
+}
+
 .compose {
   margin-top: 1rem;
   display: flex;

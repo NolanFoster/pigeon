@@ -5,8 +5,8 @@ use crate::models::{Message, PushSubscriptionRecord};
 
 pub async fn insert_message(db: &D1Database, msg: &Message) -> Result<()> {
     let stmt = db.prepare(
-        "INSERT INTO messages (id, topic, title, message, priority, tags, click, markdown, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO messages (id, topic, title, message, priority, tags, click, image, markdown, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
     );
     stmt.bind(&[
         JsValue::from_str(&msg.id),
@@ -16,6 +16,7 @@ pub async fn insert_message(db: &D1Database, msg: &Message) -> Result<()> {
         JsValue::from(msg.priority as f64),
         msg.tags.as_deref().map_or(JsValue::NULL, JsValue::from_str),
         msg.click.as_deref().map_or(JsValue::NULL, JsValue::from_str),
+        msg.image.as_deref().map_or(JsValue::NULL, JsValue::from_str),
         JsValue::from(if msg.markdown { 1.0 } else { 0.0 }),
         JsValue::from(msg.created_at as f64),
     ])?
@@ -30,7 +31,7 @@ pub async fn get_messages_since(
     since: i64,
 ) -> Result<Vec<Message>> {
     let stmt = db.prepare(
-        "SELECT id, topic, title, message, priority, tags, click, markdown, created_at
+        "SELECT id, topic, title, message, priority, tags, click, image, markdown, created_at
          FROM messages WHERE topic = ?1 AND created_at > ?2 ORDER BY created_at ASC",
     );
     let result = stmt
@@ -78,6 +79,12 @@ pub async fn insert_push_subscription(
     Ok(())
 }
 
+pub async fn delete_messages(db: &D1Database, topic: &str) -> Result<()> {
+    let stmt = db.prepare("DELETE FROM messages WHERE topic = ?1");
+    stmt.bind(&[JsValue::from_str(topic)])?.run().await?;
+    Ok(())
+}
+
 pub async fn delete_push_subscription(
     db: &D1Database,
     topic: &str,
@@ -102,6 +109,7 @@ struct MessageRow {
     priority: u8,
     tags: Option<String>,
     click: Option<String>,
+    image: Option<String>,
     markdown: i32,
     created_at: i64,
 }
@@ -116,6 +124,7 @@ impl From<MessageRow> for Message {
             priority: row.priority,
             tags: row.tags,
             click: row.click,
+            image: row.image,
             markdown: row.markdown != 0,
             created_at: row.created_at,
         }
