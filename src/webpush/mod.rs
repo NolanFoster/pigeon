@@ -7,6 +7,13 @@ use worker::wasm_bindgen::JsValue;
 use crate::db;
 use crate::models::Message;
 
+enum PushError {
+    Gone,
+    NotFound,
+    HttpStatus(u16),
+    Worker(worker::Error),
+}
+
 pub async fn send_push_to_topic(env: &Env, msg: &Message) -> Result<()> {
     let db = env.d1("DB")?;
     let subscriptions = db::get_push_subscriptions(&db, &msg.topic).await?;
@@ -34,8 +41,17 @@ pub async fn send_push_to_topic(env: &Env, msg: &Message) -> Result<()> {
         .await
         {
             Ok(_) => {}
-            Err(e) => {
-                console_log!("Web Push failed for {}: {:?}", &sub.endpoint, e);
+            Err(PushError::Gone | PushError::NotFound) => {
+                console_log!("Removing expired push subscription for {}", &sub.endpoint);
+                if let Err(e) = db::delete_push_subscription(&db, &msg.topic, &sub.endpoint).await {
+                    console_log!("Failed to delete expired subscription: {:?}", e);
+                }
+            }
+            Err(PushError::HttpStatus(status)) => {
+                console_log!("Web Push failed for {} with status {}", &sub.endpoint, status);
+            }
+            Err(PushError::Worker(e)) => {
+                console_log!("Web Push error for {}: {:?}", &sub.endpoint, e);
             }
         }
     }
@@ -51,16 +67,17 @@ async fn send_single_push(
     vapid_private_key: &str,
     vapid_public_key: &str,
     vapid_subject: &str,
-) -> Result<()> {
-    let encrypted = encrypt::encrypt_payload(payload, p256dh, auth)?;
+) -> std::result::Result<(), PushError> {
+    let encrypted = encrypt::encrypt_payload(payload, p256dh, auth).map_err(PushError::Worker)?;
     let auth_header =
-        vapid::build_vapid_header(endpoint, vapid_private_key, vapid_public_key, vapid_subject)?;
+        vapid::build_vapid_header(endpoint, vapid_private_key, vapid_public_key, vapid_subject)
+            .map_err(PushError::Worker)?;
 
     let headers = Headers::new();
-    headers.set("Authorization", &auth_header)?;
-    headers.set("Content-Encoding", "aes128gcm")?;
-    headers.set("Content-Type", "application/octet-stream")?;
-    headers.set("TTL", "86400")?;
+    headers.set("Authorization", &auth_header).map_err(PushError::Worker)?;
+    headers.set("Content-Encoding", "aes128gcm").map_err(PushError::Worker)?;
+    headers.set("Content-Type", "application/octet-stream").map_err(PushError::Worker)?;
+    headers.set("TTL", "86400").map_err(PushError::Worker)?;
 
     let body = js_sys::Uint8Array::from(encrypted.as_slice());
     let mut init = RequestInit::new();
@@ -68,13 +85,19 @@ async fn send_single_push(
         .with_headers(headers)
         .with_body(Some(JsValue::from(body)));
 
-    let req = Request::new_with_init(endpoint, &init)?;
-    let mut resp = Fetch::Request(req).send().await?;
+    let req = Request::new_with_init(endpoint, &init).map_err(PushError::Worker)?;
+    let mut resp = Fetch::Request(req).send().await.map_err(PushError::Worker)?;
     let status = resp.status_code();
+    if status == 410 {
+        return Err(PushError::Gone);
+    }
+    if status == 404 {
+        return Err(PushError::NotFound);
+    }
     if status >= 400 {
         let body = resp.text().await.unwrap_or_default();
         console_log!("Push endpoint returned {}: {}", status, body);
-        return Err(Error::RustError(format!("Push failed with status {}", status)));
+        return Err(PushError::HttpStatus(status));
     }
     console_log!("Push sent successfully (status {})", status);
     Ok(())
