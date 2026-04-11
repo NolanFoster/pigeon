@@ -6,6 +6,9 @@
   <title>Pigeon</title>
   <link rel="icon" type="image/png" href="/favicon.png">
   <link rel="manifest" href="/manifest.json">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -37,13 +40,21 @@
       <div id="messages-list" class="messages-list"></div>
       <div class="compose">
         <input type="text" id="compose-title" placeholder="Title (optional)" autocomplete="off">
-        <div class="compose-body-row">
+        <div class="compose-editor">
           <textarea id="compose-message" placeholder="Message" rows="2"></textarea>
-          <button id="send-btn">Send</button>
         </div>
-        <div class="compose-options" style="margin-top: 0.5rem; display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; color: #64748b;">
-          <input type="checkbox" id="compose-markdown">
-          <label for="compose-markdown">Markdown</label>
+        <div class="compose-options" style="margin-top: 0.5rem; display: flex; align-items: center; justify-content: space-between; font-size: 0.9rem;">
+          <div style="display: flex; align-items: center; gap: 0.5rem;">
+            <label for="compose-priority" style="color: var(--color-text-secondary); font-weight: 500;">Priority:</label>
+            <select id="compose-priority" style="padding: 0.25rem 0.5rem; border-radius: var(--radius-sm); border: 1px solid var(--color-border); background: var(--color-surface); color: var(--color-text); outline: none;">
+              <option value="5">P5 - Critical</option>
+              <option value="4">P4 - High</option>
+              <option value="3" selected>P3 - Normal</option>
+              <option value="2">P2 - Low</option>
+              <option value="1">P1 - Info</option>
+            </select>
+          </div>
+          <button id="send-btn">Send</button>
         </div>
       </div>
     </section>
@@ -58,6 +69,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

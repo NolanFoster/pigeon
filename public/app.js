@@ -3,6 +3,7 @@ const state = {
   activeTopic: null,
   messages: {},       // topic -> Message[]
   eventSources: {},   // topic -> { ws, heartbeatId }
+  unreadCounts: {},
   pushEnabled: false,
   pushSubscription: null,
 };
@@ -85,13 +86,20 @@ async function connectTopic(topic) {
       const msgs = await res.json();
       state.messages[topic] = msgs.reverse();
       // Merge any messages that arrived via WS while fetching history
+      let newEarly = 0;
       for (const msg of earlyMessages) {
         if (!state.messages[topic].some(m => m.id === msg.id)) {
           state.messages[topic].unshift(msg);
+          newEarly++;
         }
       }
       historyLoaded = true;
-      if (state.activeTopic === topic) renderMessages();
+      if (state.activeTopic === topic) {
+        renderMessages();
+      } else if (newEarly > 0) {
+        state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + newEarly;
+        renderTopicTabs();
+      }
     } catch {}
   };
 
@@ -104,7 +112,12 @@ async function connectTopic(topic) {
       }
       if (state.messages[topic].some(m => m.id === msg.id)) return;
       state.messages[topic].unshift(msg);
-      if (state.activeTopic === topic) renderMessages();
+      if (state.activeTopic === topic) {
+        renderMessages();
+      } else {
+        state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + 1;
+        renderTopicTabs();
+      }
     } catch {}
   };
 
@@ -147,10 +160,15 @@ function disconnectTopic(topic) {
 
 function selectTopic(topic) {
   state.activeTopic = topic;
+  state.unreadCounts[topic] = 0;
   topicsSection.hidden = false;
   messagesSection.hidden = false;
   renderTopicTabs();
   renderMessages();
+  
+  if (typeof easymde !== 'undefined' && easymde) {
+    setTimeout(() => easymde.codemirror.refresh(), 100);
+  }
 }
 
 function removeTopic(topic) {
@@ -179,12 +197,14 @@ function renderTopicTabs() {
   topicsSection.hidden = false;
 
   topicTabs.innerHTML = state.topics
-    .map(t => `
+    .map(t => {
+      const unread = state.unreadCounts && state.unreadCounts[t] ? `<span class="unread-badge">${state.unreadCounts[t]}</span>` : '';
+      return `
       <button class="topic-tab ${t === state.activeTopic ? 'active' : ''}"
               onclick="selectTopic('${t}')">
-        ${t}<span class="remove" onclick="event.stopPropagation(); removeTopic('${t}')">×</span>
+        ${t}${unread}<span class="remove" onclick="event.stopPropagation(); removeTopic('${t}')">×</span>
       </button>
-    `)
+    `})
     .join('');
 }
 
@@ -209,16 +229,19 @@ function renderMessages() {
 
   messagesList.innerHTML = msgs
     .map(msg => {
-      const time = new Date(msg.created_at * 1000).toLocaleTimeString();
+      const time = timeAgo(new Date(msg.created_at * 1000));
       const title = msg.title || msg.topic;
       const tags = msg.tags ? `<div class="msg-tags">${msg.tags}</div>` : '';
-<<<<<<< HEAD
+      
+      let icon = '';
+      if (msg.priority === 5) icon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: text-bottom;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`;
+      else if (msg.priority === 4) icon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: text-bottom;"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>`;
+      else if (msg.priority === 3) icon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: text-bottom;"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>`;
+      
       const priorityLabel = msg.priority >= 3
-        ? `<span class="msg-priority-badge">P${msg.priority}</span>`
+        ? `<span class="msg-priority-badge">${icon}P${msg.priority}</span>`
         : '';
-=======
       const image = msg.image ? `<div class="msg-image"><img src="${escapeHtml(msg.image)}" alt="" loading="lazy"></div>` : '';
->>>>>>> 66e24f6 (Add image support, message clearing, and Markdown compose toggle)
       return `
         <div class="message-card priority-${msg.priority}">
           <div class="msg-header">
@@ -237,23 +260,36 @@ function renderMessages() {
 // Send message from compose form
 const composeTitle = document.getElementById('compose-title');
 const composeMessage = document.getElementById('compose-message');
+const composePriority = document.getElementById('compose-priority');
 const sendBtn = document.getElementById('send-btn');
 
+let easymde = null;
+if (typeof EasyMDE !== 'undefined') {
+  easymde = new EasyMDE({
+    element: composeMessage,
+    spellChecker: false,
+    status: false,
+    minHeight: '80px',
+  });
+  easymde.codemirror.on('keydown', (cm, e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+}
+
 sendBtn.addEventListener('click', sendMessage);
-composeMessage.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    sendMessage();
-  }
-});
 
 async function sendMessage() {
-  const body = composeMessage.value.trim();
+  const body = easymde ? easymde.value().trim() : composeMessage.value.trim();
   if (!body || !state.activeTopic) return;
 
   const headers = {};
   const title = composeTitle.value.trim();
   if (title) headers['X-Title'] = title;
+  headers['X-Markdown'] = '1';
+  if (composePriority) headers['X-Priority'] = composePriority.value;
 
   sendBtn.disabled = true;
   try {
@@ -262,7 +298,8 @@ async function sendMessage() {
       headers,
       body,
     });
-    composeMessage.value = '';
+    if (easymde) easymde.value('');
+    else composeMessage.value = '';
     composeTitle.value = '';
   } catch (err) {
     console.error('Send failed:', err);
@@ -374,6 +411,26 @@ function arrayBufferToBase64Url(buffer) {
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
+
+function timeAgo(date) {
+  const seconds = Math.floor((new Date() - date) / 1000);
+  if (seconds < 30) return "Just now";
+  let interval = seconds / 31536000;
+  if (interval > 1) return Math.floor(interval) + "y ago";
+  interval = seconds / 2592000;
+  if (interval > 1) return Math.floor(interval) + "mo ago";
+  interval = seconds / 86400;
+  if (interval > 1) return Math.floor(interval) + "d ago";
+  interval = seconds / 3600;
+  if (interval > 1) return Math.floor(interval) + "h ago";
+  interval = seconds / 60;
+  if (interval > 1) return Math.floor(interval) + "m ago";
+  return Math.floor(seconds) + "s ago";
+}
+
+setInterval(() => {
+  if (state.activeTopic) renderMessages();
+}, 60000);
 
 // Re-fetch messages when tab becomes visible to catch anything missed while backgrounded
 document.addEventListener('visibilitychange', async () => {
