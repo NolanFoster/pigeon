@@ -43,13 +43,14 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             return Ok(Response::ok(SW_JS)?.with_headers(headers));
         }
         "/manifest.json" => return serve_static(MANIFEST_JSON, "application/json"),
-        "/favicon.ico" | "/favicon.png" | "/icon-192.png" | "/icon-512.png" | "/screenshot-wide.png" | "/screenshot-narrow.png" => {
+        "/favicon.ico" | "/favicon.png" | "/icon-192.png" | "/icon-512.png" | "/screenshot-wide.png" | "/screenshot-narrow.png" | "/logo.png" => {
             let data = match path.as_str() {
                 "/favicon.ico" | "/favicon.png" => FAVICON,
                 "/icon-192.png" => ICON_192,
                 "/icon-512.png" => ICON_512,
                 "/screenshot-wide.png" => SCREENSHOT_WIDE,
                 "/screenshot-narrow.png" => SCREENSHOT_NARROW,
+                "/logo.png" => LOGO,
                 _ => unreachable!(),
             };
             let headers = Headers::new();
