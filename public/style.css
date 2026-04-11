@@ -1,6 +1,6 @@
 :root {
-  --color-primary: #6b4c2a;
-  --color-primary-dark: #553b1f;
+  --color-primary: #654f44;
+  --color-primary-dark: #534137;
   --color-bg: #faf8f5;
   --color-surface: #fff;
   --color-text: #2c2418;
@@ -14,7 +14,7 @@
   --color-code-text: #d4a86c;
   --color-priority-5: #c0392b;
   --color-priority-4: #d4813a;
-  --color-priority-3: #6b4c2a;
+  --color-priority-3: #654f44;
   --color-priority-2: #8c7a66;
   --color-priority-1: #d4c5b0;
 
@@ -77,6 +77,15 @@ header {
 header h1 {
   font-size: 2rem;
   color: var(--color-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.logo {
+  height: 2.5rem;
+  width: auto;
 }
 
 .subtitle {
