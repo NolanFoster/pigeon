@@ -177,7 +177,7 @@ button:hover {
   cursor: pointer;
   transition: all 0.2s;
   border: none;
-  color: var(--color-text-muted);
+  color: var(--color-text-secondary);
 }
 
 .topic-tab.active {
@@ -369,6 +369,7 @@ button:hover {
   font-size: 0.9rem;
   outline: none;
   background: var(--color-surface);
+  color: var(--color-text);
   transition: border-color 0.2s;
 }
 
