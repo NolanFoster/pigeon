@@ -238,11 +238,19 @@ function renderMessages() {
         ? `<span class="msg-priority-badge">${icon}P${msg.priority}</span>`
         : '';
       const image = msg.image ? `<div class="msg-image"><img src="${escapeHtml(msg.image)}" alt="" loading="lazy"></div>` : '';
+      
+      const copyIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+
       return `
         <div class="message-card priority-${msg.priority}">
           <div class="msg-header">
             <span class="msg-title">${escapeHtml(title)}${priorityLabel}</span>
-            <span class="msg-time">${time}</span>
+            <div class="msg-header-right">
+              <span class="msg-time">${time}</span>
+              <button class="copy-btn" title="Copy message" onclick="copyMessage('${msg.id}', this)">
+                ${copyIcon}
+              </button>
+            </div>
           </div>
           <div class="msg-body">${msg.markdown ? renderMarkdown(msg.message) : escapeHtml(msg.message)}</div>
           ${image}
@@ -378,12 +386,14 @@ function escapeHtml(str) {
 
 function renderMarkdown(str) {
   if (typeof marked !== 'undefined') {
-    return marked.parse(str);
+    const html = marked.parse(str);
+    // Expert UI touch: Inject copy buttons into code blocks
+    return html.replace(/<pre><code/g, '<div class="code-wrapper"><button class="code-copy-btn" onclick="copyCode(this)">Copy</button><pre><code').replace(/<\/code><\/pre>/g, '</code></pre></div>');
   }
   
   let html = escapeHtml(str);
   // Code blocks: ```...```
-  html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+  html = html.replace(/```([\s\S]*?)```/g, '<div class="code-wrapper"><button class="code-copy-btn" onclick="copyCode(this)">Copy</button><pre><code>$1</code></pre></div>');
   // Inline code: `...`
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
   // Bold: **...**
@@ -397,6 +407,27 @@ function renderMarkdown(str) {
   html = html.replace(/\n/g, '<br>');
   return html;
 }
+
+window.copyCode = (btn) => {
+  const code = btn.nextElementSibling.querySelector('code').innerText;
+  navigator.clipboard.writeText(code).then(() => {
+    const original = btn.innerText;
+    btn.innerText = 'Copied!';
+    setTimeout(() => btn.innerText = original, 2000);
+  });
+};
+
+window.copyMessage = (id, btn) => {
+  const msgs = state.messages[state.activeTopic] || [];
+  const msg = msgs.find(m => m.id === id);
+  if (!msg) return;
+  
+  navigator.clipboard.writeText(msg.message).then(() => {
+    const original = btn.innerHTML;
+    btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+    setTimeout(() => btn.innerHTML = original, 2000);
+  });
+};
 
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
