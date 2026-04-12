@@ -316,6 +316,41 @@ button:hover {
   background: rgba(255, 255, 255, 0.2);
 }
 
+.msg-body {
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+.msg-body p,
+.msg-body ul,
+.msg-body ol,
+.msg-body blockquote {
+  margin-bottom: 0.75rem;
+}
+
+.msg-body p:last-child,
+.msg-body ul:last-child,
+.msg-body ol:last-child,
+.msg-body blockquote:last-child {
+  margin-bottom: 0;
+}
+
+.msg-body ul,
+.msg-body ol {
+  padding-left: 1.5rem;
+}
+
+.msg-body li {
+  margin-bottom: 0.25rem;
+}
+
+.msg-body blockquote {
+  border-left: 3px solid var(--color-border);
+  padding-left: 1rem;
+  color: var(--color-text-secondary);
+  margin-left: 0;
+}
+
 .msg-body pre {
   background: var(--color-code-bg);
   color: var(--color-code-text);
