@@ -35,6 +35,32 @@ self.addEventListener('fetch', (event) => {
   }
 });
 
+function stripMarkdown(text) {
+  if (!text) return '';
+  return text
+    // Remove Images
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '')
+    // Remove Links [text](url)
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    // Remove Headers
+    .replace(/^#{1,6}\s+(.*)/gm, '$1')
+    // Remove Bold/Italic
+    .replace(/(\*\*|__)(.*?)\1/g, '$2')
+    .replace(/(\*|_)(.*?)\1/g, '$2')
+    // Remove Strikethrough
+    .replace(/~~(.*?)~~/g, '$1')
+    // Replace Code Blocks with [Code]
+    .replace(/```[\s\S]*?```/g, '[Code Block]')
+    // Remove Inline Code
+    .replace(/`([^`]+)`/g, '$1')
+    // Remove Blockquotes
+    .replace(/^\s*>\s+/gm, '')
+    // Remove Lists
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/^\s*\d+\.\s+/gm, '')
+    .trim();
+}
+
 self.addEventListener('push', (event) => {
   let data = {};
   try {
@@ -44,8 +70,13 @@ self.addEventListener('push', (event) => {
   }
 
   const title = data.title || data.topic || 'Pigeon';
+  let bodyText = data.message || '';
+  if (data.markdown) {
+    bodyText = stripMarkdown(bodyText);
+  }
+
   const options = {
-    body: data.message || '',
+    body: bodyText,
     tag: data.id || undefined,
     icon: '/icon-192.png',
     badge: '/icon-192.png',
