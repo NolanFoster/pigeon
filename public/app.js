@@ -6,6 +6,7 @@ const state = {
   unreadCounts: {},
   pushEnabled: false,
   pushSubscription: null,
+  filterTag: null,
 };
 
 // DOM elements
@@ -205,9 +206,24 @@ function renderTopicTabs() {
 }
 
 function renderMessages() {
-  const msgs = state.messages[state.activeTopic] || [];
+  let msgs = state.messages[state.activeTopic] || [];
+  
+  const filterBanner = state.filterTag 
+    ? `<div class="filter-banner">
+        <span>Filtering by tag: <strong>${escapeHtml(state.filterTag)}</strong></span>
+        <button class="clear-filter-btn" onclick="clearFilterTag()">Clear</button>
+       </div>`
+    : '';
+
+  if (state.filterTag) {
+    msgs = msgs.filter(msg => {
+      if (!msg.tags) return false;
+      return msg.tags.split(',').map(t => t.trim()).includes(state.filterTag);
+    });
+  }
+
   if (msgs.length === 0) {
-    messagesList.innerHTML = `
+    messagesList.innerHTML = filterBanner + `
       <div class="empty-state">
         <svg class="empty-state-icon" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
           <rect x="12" y="24" width="56" height="36" rx="4" stroke="currentColor" stroke-width="2"/>
@@ -215,19 +231,21 @@ function renderMessages() {
           <circle cx="62" cy="22" r="8" fill="#7a8b5c" opacity="0.2" stroke="#7a8b5c" stroke-width="2"/>
           <path d="M59 22l2 2 4-4" stroke="#7a8b5c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-        <p class="empty-state-title">Listening for messages</p>
-        <p class="empty-state-hint">Use the compose area below or send one via HTTP:</p>
-        <code class="empty-state-cmd">curl -d "Hello!" ${location.origin}/${state.activeTopic}</code>
+        <p class="empty-state-title">${state.filterTag ? 'No messages with this tag' : 'Listening for messages'}</p>
+        <p class="empty-state-hint">${state.filterTag ? 'Try clearing the filter or sending a message with this tag.' : 'Use the compose area below or send one via HTTP:'}</p>
+        ${state.filterTag ? '' : `<code class="empty-state-cmd">curl -d "Hello!" ${location.origin}/${state.activeTopic}</code>`}
       </div>
     `;
     return;
   }
 
-  messagesList.innerHTML = msgs
+  messagesList.innerHTML = filterBanner + msgs
     .map(msg => {
       const time = timeAgo(new Date(msg.created_at * 1000));
       const title = msg.title || msg.topic;
-      const tags = msg.tags ? `<div class="msg-tags">${msg.tags}</div>` : '';
+      const tags = msg.tags 
+        ? `<div class="msg-tags">` + msg.tags.split(',').map(t => `<span class="tag-chip" onclick="setFilterTag('${escapeHtml(t.trim())}')">${escapeHtml(t.trim())}</span>`).join('') + `</div>`
+        : '';
       
       let icon = '';
       if (msg.priority === 5) icon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: text-bottom;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`;
@@ -260,6 +278,16 @@ function renderMessages() {
     })
     .join('');
 }
+
+window.setFilterTag = (tag) => {
+  state.filterTag = tag;
+  renderMessages();
+};
+
+window.clearFilterTag = () => {
+  state.filterTag = null;
+  renderMessages();
+};
 
 // Send message from compose form
 const composeTitle = document.getElementById('compose-title');
@@ -491,3 +519,4 @@ document.addEventListener('visibilitychange', async () => {
 });
 
 init();
+

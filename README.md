@@ -11,6 +11,7 @@ Inspired by [ntfy](https://github.com/binwiederhier/ntfy).
 - **Real-time streaming** — live message delivery via WebSocket
 - **Installable PWA** — add to home screen on mobile or desktop
 - **Markdown support** — render formatted messages with `X-Markdown: 1`
+- **Filter by tag** — click any tag chip in the UI to filter messages
 - **No signup required** — subscribe to any topic, start receiving messages
 
 ## Usage
