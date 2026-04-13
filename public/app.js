@@ -19,6 +19,18 @@ const messagesList = document.getElementById('messages-list');
 const enablePushBtn = document.getElementById('enable-push-btn');
 const clearMessagesBtn = document.getElementById('clear-messages-btn');
 
+// Open rendered-message links in a new tab so clicking them doesn't tear down
+// the SPA (WebSockets, in-memory state) and force a full reload on back-nav.
+messagesList.addEventListener('click', (e) => {
+  const link = e.target.closest('a[href]');
+  if (!link || !messagesList.contains(link)) return;
+  const href = link.getAttribute('href');
+  if (/^https?:\/\//i.test(href)) {
+    e.preventDefault();
+    window.open(href, '_blank', 'noopener,noreferrer');
+  }
+});
+
 // Initialize
 async function init() {
   if ('serviceWorker' in navigator) {

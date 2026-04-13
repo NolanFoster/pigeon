@@ -43,6 +43,44 @@ test('subscribe, receive a message, and copy it', async ({ page, request, baseUR
   expect(clipboardText).toBe('Hello from the smoke test');
 });
 
+test('clicking a link in a message does not navigate the app away', async ({ page, request, baseURL }) => {
+  const topic = `smoke-link-${Date.now()}`;
+
+  await page.goto('/');
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#subscribe-btn').click();
+  await expect(page.locator('.topic-tab.active')).toContainText(topic);
+
+  await request.post(`${baseURL}/${topic}`, {
+    headers: { 'X-Title': 'Link test', 'X-Markdown': '1' },
+    data: 'See [example](https://example.com) for details',
+  });
+
+  const link = page.locator('.message-card .msg-body a').first();
+  await expect(link).toHaveAttribute('href', 'https://example.com');
+
+  // Spy on window.open BEFORE clicking, then verify the click was intercepted
+  // (window.open called) AND the current page did not navigate.
+  await page.evaluate(() => {
+    window.__openCalls = [];
+    window.open = (url, target, features) => {
+      window.__openCalls.push({ url, target, features });
+      return null;
+    };
+  });
+
+  const urlBefore = page.url();
+  await link.click();
+  const urlAfter = page.url();
+  expect(urlAfter).toBe(urlBefore);
+
+  const calls = await page.evaluate(() => window.__openCalls);
+  expect(calls).toHaveLength(1);
+  expect(calls[0].url).toBe('https://example.com');
+  expect(calls[0].target).toBe('_blank');
+  expect(calls[0].features).toContain('noopener');
+});
+
 test('tag filter hides non-matching messages', async ({ page, request, baseURL }) => {
   const topic = `smoke-filter-${Date.now()}`;
 
