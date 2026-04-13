@@ -217,7 +217,7 @@ function renderMessages() {
   const filterBanner = state.filterTag 
     ? `<div class="filter-banner">
         <span>Filtering by tag: <strong>${escapeHtml(state.filterTag)}</strong></span>
-        <button class="clear-filter-btn" onclick="clearFilterTag()">Clear Filter</button>
+        <button class="btn btn-tertiary clear-filter-btn" onclick="clearFilterTag()">Clear Filter</button>
        </div>`
     : (uniqueTags.length > 0 ? `
       <div class="tags-row">
@@ -457,8 +457,12 @@ window.copyCode = (btn) => {
   const code = btn.nextElementSibling.querySelector('code').innerText;
   navigator.clipboard.writeText(code).then(() => {
     const original = btn.innerText;
-    btn.innerText = 'Copied!';
-    setTimeout(() => btn.innerText = original, 2000);
+    btn.innerText = 'Copied';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.innerText = original;
+      btn.classList.remove('copied');
+    }, 1600);
   });
 };
 
@@ -466,11 +470,15 @@ window.copyMessage = (id, btn) => {
   const msgs = state.messages[state.activeTopic] || [];
   const msg = msgs.find(m => m.id === id);
   if (!msg) return;
-  
+
   navigator.clipboard.writeText(msg.message).then(() => {
     const original = btn.innerHTML;
     btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
-    setTimeout(() => btn.innerHTML = original, 2000);
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.innerHTML = original;
+      btn.classList.remove('copied');
+    }, 1600);
   });
 };
 

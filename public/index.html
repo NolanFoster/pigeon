@@ -23,51 +23,53 @@
     <section class="subscribe-form">
       <div class="input-group">
         <input type="text" id="topic-input" placeholder="Topic name" autocomplete="off">
-        <button id="subscribe-btn">Subscribe</button>
+        <button id="subscribe-btn" class="btn btn-primary">Subscribe</button>
       </div>
     </section>
 
     <section id="topics-section" class="topics" hidden>
       <div class="topics-header">
         <h2>Subscribed Topics</h2>
-        <button id="enable-push-btn" class="push-btn">Enable Push Notifications</button>
+        <button id="enable-push-btn" class="btn btn-secondary push-btn">Enable Push Notifications</button>
       </div>
       <div id="topic-tabs" class="topic-tabs"></div>
     </section>
 
     <section id="messages-section" class="messages" hidden>
       <div class="messages-header">
-        <button id="clear-messages-btn" class="clear-btn">Clear</button>
+        <button id="clear-messages-btn" class="btn btn-tertiary clear-btn">Clear</button>
       </div>
       <div id="messages-list" class="messages-list"></div>
       <div class="compose">
-        <input type="text" id="compose-title" placeholder="Title (optional)" autocomplete="off">
-        <input type="text" id="compose-tags" placeholder="Tags (comma-separated, optional)" autocomplete="off" style="margin-top: 0.5rem; width: 100%;">
-        <div class="compose-editor">
-          <div id="compose-editor-container" style="margin-top: 0.5rem;"></div>
+        <div class="compose-meta">
+          <input type="text" id="compose-title" class="compose-title-input" placeholder="Title (optional)" autocomplete="off">
+          <select id="compose-priority" class="compose-priority-select" aria-label="Message priority">
+            <option value="5">P5 · Critical</option>
+            <option value="4">P4 · High</option>
+            <option value="3" selected>P3 · Normal</option>
+            <option value="2">P2 · Low</option>
+            <option value="1">P1 · Info</option>
+          </select>
         </div>
-        <div class="compose-options" style="margin-top: 0.5rem; display: flex; align-items: center; justify-content: space-between; font-size: 0.9rem;">
-          <div style="display: flex; align-items: center; gap: 0.5rem;">
-            <label for="compose-priority" style="color: var(--color-text-secondary); font-weight: 500;">Priority:</label>
-            <select id="compose-priority" style="padding: 0.25rem 0.5rem; border-radius: var(--radius-sm); border: 1px solid var(--color-border); background: var(--color-surface); color: var(--color-text); outline: none;">
-              <option value="5">P5 - Critical</option>
-              <option value="4">P4 - High</option>
-              <option value="3" selected>P3 - Normal</option>
-              <option value="2">P2 - Low</option>
-              <option value="1">P1 - Info</option>
-            </select>
-          </div>
-          <button id="send-btn">Send</button>
+        <div class="compose-tags-field">
+          <span class="compose-tags-prefix" aria-hidden="true">#</span>
+          <input type="text" id="compose-tags" class="compose-tags-input" placeholder="tags, comma separated" autocomplete="off">
+        </div>
+        <div class="compose-editor">
+          <div id="compose-editor-container"></div>
+        </div>
+        <div class="compose-actions">
+          <button id="send-btn" class="btn btn-primary">Send</button>
         </div>
       </div>
     </section>
 
     <section class="usage">
       <h2>Send a message</h2>
-      <pre><code>curl -d "Hello!" https://your-worker.dev/mytopic</code></pre>
+      <div class="code-wrapper"><button class="code-copy-btn" onclick="copyCode(this)">Copy</button><pre><code>curl -d "Hello!" https://your-worker.dev/mytopic</code></pre></div>
       <p>With title and priority:</p>
-      <pre><code>curl -H "X-Title: Alert" -H "X-Priority: 5" \
-     -d "Server is down!" https://your-worker.dev/mytopic</code></pre>
+      <div class="code-wrapper"><button class="code-copy-btn" onclick="copyCode(this)">Copy</button><pre><code>curl -H "X-Title: Alert" -H "X-Priority: 5" \
+     -d "Server is down!" https://your-worker.dev/mytopic</code></pre></div>
     </section>
   </div>
 
