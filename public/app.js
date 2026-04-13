@@ -206,14 +206,27 @@ function renderTopicTabs() {
 }
 
 function renderMessages() {
-  let msgs = state.messages[state.activeTopic] || [];
+  const allMsgs = state.messages[state.activeTopic] || [];
+  let msgs = [...allMsgs];
   
+  // Extract all unique tags for the current topic to show as quick-filters
+  const uniqueTags = Array.from(new Set(
+    allMsgs.flatMap(m => m.tags ? m.tags.split(',').map(t => t.trim()) : [])
+  )).sort();
+
   const filterBanner = state.filterTag 
     ? `<div class="filter-banner">
         <span>Filtering by tag: <strong>${escapeHtml(state.filterTag)}</strong></span>
-        <button class="clear-filter-btn" onclick="clearFilterTag()">Clear</button>
+        <button class="clear-filter-btn" onclick="clearFilterTag()">Clear Filter</button>
        </div>`
-    : '';
+    : (uniqueTags.length > 0 ? `
+      <div class="tags-row">
+        <span class="tags-label">Filter by tag:</span>
+        <div class="tags-chips-container">
+          ${uniqueTags.map(t => `<span class="tag-chip" onclick="setFilterTag('${escapeHtml(t)}')">${escapeHtml(t)}</span>`).join('')}
+        </div>
+      </div>
+    ` : '');
 
   if (state.filterTag) {
     msgs = msgs.filter(msg => {
@@ -291,6 +304,7 @@ window.clearFilterTag = () => {
 
 // Send message from compose form
 const composeTitle = document.getElementById('compose-title');
+const composeTags = document.getElementById('compose-tags');
 const composePriority = document.getElementById('compose-priority');
 const sendBtn = document.getElementById('send-btn');
 
@@ -327,6 +341,8 @@ async function sendMessage() {
   const headers = {};
   const title = composeTitle.value.trim();
   if (title) headers['X-Title'] = title;
+  const tags = composeTags ? composeTags.value.trim() : '';
+  if (tags) headers['X-Tags'] = tags;
   headers['X-Markdown'] = '1';
   if (composePriority) headers['X-Priority'] = composePriority.value;
 
@@ -339,6 +355,7 @@ async function sendMessage() {
     });
     if (editor) editor.setMarkdown('');
     composeTitle.value = '';
+    if (composeTags) composeTags.value = '';
   } catch (err) {
     console.error('Send failed:', err);
   } finally {

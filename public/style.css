@@ -450,6 +450,27 @@ button:hover {
   color: var(--color-bg);
 }
 
+.tags-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  padding: 0 0.5rem;
+}
+
+.tags-label {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.tags-chips-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
 .filter-banner {
   display: flex;
   justify-content: space-between;
