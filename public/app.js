@@ -228,14 +228,13 @@ function renderMessages() {
 
   const filterBanner = state.filterTag 
     ? `<div class="filter-banner">
-        <span>Filtering by tag: <strong>${escapeHtml(state.filterTag)}</strong></span>
+        <span>Filtering by tag: <strong>${escapeHtml(emojifyTag(state.filterTag))}</strong></span>
         <button class="btn btn-tertiary clear-filter-btn" onclick="clearFilterTag()">Clear Filter</button>
-       </div>`
-    : (uniqueTags.length > 0 ? `
+       </div>`    : (uniqueTags.length > 0 ? `
       <div class="tags-row">
         <span class="tags-label">Filter by tag:</span>
         <div class="tags-chips-container">
-          ${uniqueTags.map(t => `<span class="tag-chip" onclick="setFilterTag('${escapeHtml(t)}')">${escapeHtml(t)}</span>`).join('')}
+          ${uniqueTags.map(t => `<span class="tag-chip" onclick="setFilterTag('${escapeHtml(t)}')">${escapeHtml(emojifyTag(t))}</span>`).join('')}
         </div>
       </div>
     ` : '');
@@ -269,7 +268,10 @@ function renderMessages() {
       const time = timeAgo(new Date(msg.created_at * 1000));
       const title = msg.title || msg.topic;
       const tags = msg.tags 
-        ? `<div class="msg-tags">` + msg.tags.split(',').map(t => `<span class="tag-chip" onclick="setFilterTag('${escapeHtml(t.trim())}')">${escapeHtml(t.trim())}</span>`).join('') + `</div>`
+        ? `<div class="msg-tags">` + msg.tags.split(',').map(t => {
+            const raw = t.trim();
+            return `<span class="tag-chip" onclick="setFilterTag('${escapeHtml(raw)}')">${escapeHtml(emojifyTag(raw))}</span>`;
+          }).join('') + `</div>`
         : '';
       
       let icon = '';
@@ -435,6 +437,50 @@ enablePushBtn.addEventListener('click', async () => {
 });
 
 // Helpers
+// GitHub-style shortcode → emoji. Unknown shortcodes fall through unchanged.
+const EMOJI_SHORTCODES = {
+  tada: '🎉', eyes: '👀', white_check_mark: '✅', x: '❌',
+  warning: '⚠️', rocket: '🚀', fire: '🔥', bug: '🐛',
+  sparkles: '✨', heart: '❤️', thumbsup: '👍', '+1': '👍',
+  thumbsdown: '👎', '-1': '👎', heavy_check_mark: '✔️',
+  question: '❓', exclamation: '❗', bell: '🔔', lock: '🔒',
+  unlock: '🔓', key: '🔑', star: '⭐', zap: '⚡',
+  boom: '💥', bomb: '💣', wrench: '🔧', hammer: '🔨',
+  gear: '⚙️', mag: '🔍', package: '📦', memo: '📝',
+  book: '📖', bookmark: '🔖', calendar: '📅', clock: '🕐',
+  hourglass: '⌛', email: '📧', mailbox: '📬', phone: '📞',
+  computer: '💻', printer: '🖨️', tv: '📺', camera: '📷',
+  movie_camera: '🎥', microphone: '🎤', speaker: '🔊', mute: '🔇',
+  house: '🏠', office: '🏢', school: '🏫', hospital: '🏥',
+  sunny: '☀️', cloud: '☁️', umbrella: '☂️', snowflake: '❄️',
+  zap_bolt: '⚡', rainbow: '🌈', earth_americas: '🌎',
+  moon: '🌙', sun: '☀️', fire_engine: '🚒', car: '🚗',
+  airplane: '✈️', ship: '🚢', train: '🚆', bike: '🚲',
+  trophy: '🏆', medal: '🏅', gift: '🎁', balloon: '🎈',
+  art: '🎨', musical_note: '🎵', dart: '🎯', game_die: '🎲',
+  coffee: '☕', beer: '🍺', pizza: '🍕', apple: '🍎',
+  dog: '🐶', cat: '🐱', mouse: '🐭', rabbit: '🐰',
+  bird: '🐦', fish: '🐟', bee: '🐝', ant: '🐜',
+  turtle: '🐢', snake: '🐍', dragon: '🐉', unicorn: '🦄',
+  skull: '💀', ghost: '👻', alien: '👽', robot: '🤖',
+  construction: '🚧', no_entry: '⛔', recycle: '♻️', checkered_flag: '🏁',
+  green_circle: '🟢', yellow_circle: '🟡', red_circle: '🔴',
+  large_blue_circle: '🔵', black_circle: '⚫', white_circle: '⚪',
+  arrow_up: '⬆️', arrow_down: '⬇️', arrow_left: '⬅️', arrow_right: '➡️',
+  up: '🆙', new: '🆕', ok: '🆗', cool: '🆒', free: '🆓',
+  hundred: '💯', rotating_light: '🚨', mega: '📣', loudspeaker: '📢',
+  hourglass_flowing_sand: '⏳', stopwatch: '⏱️', alarm_clock: '⏰',
+  pushpin: '📌', paperclip: '📎', scissors: '✂️', pencil2: '✏️',
+  eye: '👁️', speech_balloon: '💬', thought_balloon: '💭',
+  zzz: '💤', dash: '💨', sweat_drops: '💦',
+};
+
+function emojifyTag(tag) {
+  // Accept either `tada` or `:tada:`; leave unknown shortcodes alone.
+  const key = tag.replace(/^:|:$/g, '');
+  return EMOJI_SHORTCODES[key] || tag;
+}
+
 function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;

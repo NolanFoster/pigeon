@@ -108,3 +108,29 @@ test('tag filter hides non-matching messages', async ({ page, request, baseURL }
   await page.locator('.clear-filter-btn').click();
   await expect(page.locator('.message-card')).toHaveCount(2);
 });
+
+test('tag shortcodes render as emoji', async ({ page, request, baseURL }) => {
+  const topic = `smoke-emoji-${Date.now()}`;
+
+  await page.goto('/');
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#subscribe-btn').click();
+  await expect(page.locator('.topic-tab.active')).toContainText(topic);
+
+  await request.post(`${baseURL}/${topic}`, {
+    headers: { 'X-Title': 'Emoji', 'X-Tags': 'tada,eyes,white_check_mark,notashortcode' },
+    data: 'hi',
+  });
+
+  const chips = page.locator('.message-card .msg-tags .tag-chip');
+  await expect(chips).toHaveCount(4);
+  await expect(chips.nth(0)).toHaveText('🎉');
+  await expect(chips.nth(1)).toHaveText('👀');
+  await expect(chips.nth(2)).toHaveText('✅');
+  await expect(chips.nth(3)).toHaveText('notashortcode');
+
+  // Filtering still keys off the raw shortcode — click the 🎉 chip, expect it to stick.
+  await chips.nth(0).click();
+  await expect(page.locator('.filter-banner strong')).toHaveText('🎉');
+  await expect(page.locator('.message-card')).toHaveCount(1);
+});
