@@ -78,6 +78,7 @@ async fn send_single_push(
     headers.set("Content-Encoding", "aes128gcm").map_err(PushError::Worker)?;
     headers.set("Content-Type", "application/octet-stream").map_err(PushError::Worker)?;
     headers.set("TTL", "86400").map_err(PushError::Worker)?;
+    headers.set("Urgency", "high").map_err(PushError::Worker)?;
 
     let body = js_sys::Uint8Array::from(encrypted.as_slice());
     let mut init = RequestInit::new();
