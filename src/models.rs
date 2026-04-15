@@ -1,4 +1,15 @@
 use serde::{Deserialize, Serialize};
+use worker::{Error, Result};
+
+pub fn validate_topic(topic: &str) -> Result<()> {
+    if topic.is_empty() || topic.len() > 64 {
+        return Err(Error::RustError("topic must be 1-64 chars".into()));
+    }
+    if !topic.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(Error::RustError("invalid topic characters".into()));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {

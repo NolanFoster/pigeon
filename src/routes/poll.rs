@@ -1,9 +1,11 @@
 use worker::*;
 
 use crate::db;
+use crate::models::validate_topic;
 
 pub async fn handle(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let topic = ctx.param("topic").unwrap();
+    validate_topic(topic)?;
 
     let url = _req.url()?;
     let since: i64 = url
@@ -26,6 +28,7 @@ pub async fn handle(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
 
 pub async fn delete(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let topic = ctx.param("topic").unwrap();
+    validate_topic(topic)?;
     let d1 = ctx.env.d1("DB")?;
     db::delete_messages(&d1, topic).await?;
     Response::ok("deleted")

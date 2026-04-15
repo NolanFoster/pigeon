@@ -55,6 +55,12 @@ pub async fn get_push_subscriptions(
     result.results()
 }
 
+pub async fn count_push_subscriptions(db: &D1Database, topic: &str) -> Result<u32> {
+    let stmt = db.prepare("SELECT COUNT(*) as count FROM push_subscriptions WHERE topic = ?1");
+    let result = stmt.bind(&[JsValue::from_str(topic)])?.first::<u32>(Some("count")).await?;
+    Ok(result.unwrap_or(0))
+}
+
 pub async fn insert_push_subscription(
     db: &D1Database,
     topic: &str,

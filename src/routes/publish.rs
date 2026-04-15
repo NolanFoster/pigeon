@@ -3,11 +3,16 @@ use worker::*;
 use worker::wasm_bindgen::JsValue;
 
 use crate::db;
-use crate::models::Message;
+use crate::models::{Message, validate_topic};
 
 pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let topic = ctx.param("topic").unwrap().to_string();
+    validate_topic(&topic)?;
+
     let body = req.text().await?;
+    if body.len() > 8192 {
+        return Response::error("Payload Too Large: message must be <= 8KB", 413);
+    }
 
     let headers = req.headers();
     let title = headers.get("X-Title")?.or(headers.get("Title")?);
@@ -15,7 +20,8 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         .get("X-Priority")?
         .or(headers.get("Priority")?)
         .and_then(|p| p.parse().ok())
-        .unwrap_or(3);
+        .unwrap_or(3)
+        .clamp(1, 5);
     let tags = headers.get("X-Tags")?.or(headers.get("Tags")?);
     let click = headers.get("X-Click")?.or(headers.get("Click")?);
     let image = headers.get("X-Image")?.or(headers.get("Image")?);

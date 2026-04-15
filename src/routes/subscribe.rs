@@ -1,7 +1,9 @@
 use worker::*;
+use crate::models::validate_topic;
 
 pub async fn handle(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let topic = ctx.param("topic").unwrap().to_string();
+    validate_topic(&topic)?;
 
     let namespace = ctx.env.durable_object("TOPIC_ROOM")?;
     let stub = namespace.id_from_name(&topic)?.get_stub()?;
