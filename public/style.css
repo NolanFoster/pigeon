@@ -63,7 +63,7 @@
   box-sizing: border-box;
 }
 
-body {
+html, body {
   font-family: 'Roboto', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: var(--color-bg);
   color: var(--color-text);

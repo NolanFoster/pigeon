@@ -291,7 +291,7 @@ function renderMessages() {
           <div class="msg-header">
             <span class="msg-title">${escapeHtml(title)}${priorityLabel}</span>
             <div class="msg-header-right">
-              <span class="msg-time">${time}</span>
+              <span class="msg-time" data-time="${msg.created_at}">${time}</span>
               <button class="copy-btn" title="Copy message" onclick="copyMessage('${msg.id}', this)">
                 ${copyIcon}
               </button>
@@ -573,7 +573,13 @@ function timeAgo(date) {
 }
 
 setInterval(() => {
-  if (state.activeTopic) renderMessages();
+  if (!state.activeTopic) return;
+  document.querySelectorAll('.msg-time').forEach(el => {
+    const timeVal = el.getAttribute('data-time');
+    if (timeVal) {
+      el.textContent = timeAgo(new Date(timeVal * 1000));
+    }
+  });
 }, 60000);
 
 // Re-fetch messages when tab becomes visible to catch anything missed while backgrounded
