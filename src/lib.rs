@@ -18,6 +18,7 @@ const SCREENSHOT_WIDE: &[u8] = include_bytes!("../public/screenshot-wide.png");
 const SCREENSHOT_NARROW: &[u8] = include_bytes!("../public/screenshot-narrow.png");
 const FAVICON: &[u8] = include_bytes!("../public/favicon.png");
 const LOGO: &[u8] = include_bytes!("../public/logo.png");
+const BADGE: &[u8] = include_bytes!("../public/badge.png");
 
 fn serve_static(content: &str, content_type: &str) -> Result<Response> {
     let headers = Headers::new();
@@ -44,7 +45,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             return Ok(Response::ok(SW_JS)?.with_headers(headers));
         }
         "/manifest.json" => return serve_static(MANIFEST_JSON, "application/json"),
-        "/favicon.ico" | "/favicon.png" | "/icon-192.png" | "/icon-512.png" | "/screenshot-wide.png" | "/screenshot-narrow.png" | "/logo.png" => {
+        "/favicon.ico" | "/favicon.png" | "/icon-192.png" | "/icon-512.png" | "/screenshot-wide.png" | "/screenshot-narrow.png" | "/logo.png" | "/badge.png" => {
             let data = match path.as_str() {
                 "/favicon.ico" | "/favicon.png" => FAVICON,
                 "/icon-192.png" => ICON_192,
@@ -52,6 +53,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 "/screenshot-wide.png" => SCREENSHOT_WIDE,
                 "/screenshot-narrow.png" => SCREENSHOT_NARROW,
                 "/logo.png" => LOGO,
+                "/badge.png" => BADGE,
                 _ => unreachable!(),
             };
             let headers = Headers::new();

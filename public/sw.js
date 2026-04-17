@@ -1,5 +1,5 @@
-const CACHE_NAME = 'pigeon-v1';
-const STATIC_ASSETS = ['/', '/style.css', '/app.js', '/manifest.json'];
+const CACHE_NAME = 'pigeon-v2';
+const STATIC_ASSETS = ['/', '/style.css', '/app.js', '/manifest.json', '/badge.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -79,7 +79,7 @@ self.addEventListener('push', (event) => {
     body: bodyText,
     tag: data.id || undefined,
     icon: '/icon-192.png',
-    badge: '/icon-192.png',
+    badge: '/badge.png',
     image: data.image || undefined,
     data: { click: data.click, topic: data.topic },
   };

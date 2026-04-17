@@ -1,3 +1,4 @@
+/* global Sortable */
 const state = {
   topics: JSON.parse(localStorage.getItem('pigeon_topics') || '[]'),
   activeTopic: null,
