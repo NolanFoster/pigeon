@@ -197,6 +197,11 @@ button {
   transform: scale(1.03);
 }
 
+.topic-tab-ghost {
+  opacity: 0.4;
+  background: var(--color-border);
+}
+
 .topic-tab .remove {
   margin-left: 0.5rem;
   opacity: 0.6;

@@ -33,6 +33,22 @@ messagesList.addEventListener('click', (e) => {
 
 // Initialize
 async function init() {
+  if (typeof Sortable !== 'undefined') {
+    new Sortable(topicTabs, {
+      animation: 150,
+      ghostClass: 'topic-tab-ghost',
+      onEnd: function (evt) {
+        if (evt.oldIndex === evt.newIndex) return;
+
+        const itemEl = state.topics.splice(evt.oldIndex, 1)[0];
+        state.topics.splice(evt.newIndex, 0, itemEl);
+        
+        localStorage.setItem('pigeon_topics', JSON.stringify(state.topics));
+        renderTopicTabs();
+      },
+    });
+  }
+
   if ('serviceWorker' in navigator) {
     await navigator.serviceWorker.register('/sw.js');
 

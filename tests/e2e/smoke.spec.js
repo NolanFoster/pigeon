@@ -134,3 +134,38 @@ test('tag shortcodes render as emoji', async ({ page, request, baseURL }) => {
   await expect(page.locator('.filter-banner strong')).toHaveText('🎉');
   await expect(page.locator('.message-card')).toHaveCount(1);
 });
+
+test('topics can be reordered via drag and drop', async ({ page }) => {
+  await page.goto('/');
+
+  // Add three topics
+  const topics = ['topic-a', 'topic-b', 'topic-c'];
+  for (const topic of topics) {
+    await page.locator('#topic-input').fill(topic);
+    await page.locator('#subscribe-btn').click();
+    await expect(page.locator('.topic-tab.active')).toContainText(topic);
+  }
+
+  const tabs = page.locator('.topic-tab');
+  await expect(tabs).toHaveCount(3);
+  await expect(tabs.nth(0)).toContainText('topic-a');
+  await expect(tabs.nth(1)).toContainText('topic-b');
+  await expect(tabs.nth(2)).toContainText('topic-c');
+
+  // Drag 'topic-a' (index 0) to 'topic-c' (index 2)
+  await tabs.nth(0).dragTo(tabs.nth(2));
+
+  // The order should now be topic-b, topic-c, topic-a
+  await expect(tabs.nth(0)).toContainText('topic-b');
+  await expect(tabs.nth(1)).toContainText('topic-c');
+  await expect(tabs.nth(2)).toContainText('topic-a');
+
+  // Reload page to ensure order was saved to localStorage
+  await page.reload();
+
+  const reloadedTabs = page.locator('.topic-tab');
+  await expect(reloadedTabs).toHaveCount(3);
+  await expect(reloadedTabs.nth(0)).toContainText('topic-b');
+  await expect(reloadedTabs.nth(1)).toContainText('topic-c');
+  await expect(reloadedTabs.nth(2)).toContainText('topic-a');
+});
