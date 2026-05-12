@@ -9,6 +9,8 @@ mod webpush;
 // Embed static files directly in the binary
 const INDEX_HTML: &str = include_str!("../public/index.html");
 const APP_JS: &str = include_str!("../public/app.js");
+const CRYPTO_JS: &str = include_str!("../public/crypto.js");
+const KEYSTORE_JS: &str = include_str!("../public/keystore.js");
 const STYLE_CSS: &str = include_str!("../public/style.css");
 const SW_JS: &str = include_str!("../public/sw.js");
 const MANIFEST_JSON: &str = include_str!("../public/manifest.json");
@@ -37,6 +39,8 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     match path.as_str() {
         "/" | "/index.html" => return serve_static(INDEX_HTML, "text/html; charset=utf-8"),
         "/app.js" => return serve_static(APP_JS, "application/javascript; charset=utf-8"),
+        "/crypto.js" => return serve_static(CRYPTO_JS, "application/javascript; charset=utf-8"),
+        "/keystore.js" => return serve_static(KEYSTORE_JS, "application/javascript; charset=utf-8"),
         "/style.css" => return serve_static(STYLE_CSS, "text/css; charset=utf-8"),
         "/sw.js" => {
             let headers = Headers::new();

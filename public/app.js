@@ -1,6 +1,10 @@
-/* global Sortable */
+/* global Sortable, PigeonCrypto, PigeonKeystore */
 const state = {
   topics: JSON.parse(localStorage.getItem('pigeon_topics') || '[]'),
+  // topicMeta[name] = { e2ee, salt, iter } — encryption config persisted alongside topics
+  topicMeta: JSON.parse(localStorage.getItem('pigeon_topic_meta') || '{}'),
+  // topicKeys[name] = CryptoKey (in-memory; derived from passphrase + meta)
+  topicKeys: {},
   activeTopic: null,
   messages: {},       // topic -> Message[]
   eventSources: {},   // topic -> { ws, heartbeatId }
@@ -10,9 +14,65 @@ const state = {
   filterTag: null,
 };
 
+function saveTopicMeta() {
+  localStorage.setItem('pigeon_topic_meta', JSON.stringify(state.topicMeta));
+}
+
+function isE2eeTopic(topic) {
+  return !!(state.topicMeta[topic] && state.topicMeta[topic].e2ee);
+}
+
+// Loads stored passphrase from IDB and derives an AES-GCM key for the topic.
+// Returns true on success.
+async function loadTopicKey(topic) {
+  const meta = state.topicMeta[topic];
+  if (!meta || !meta.e2ee) return false;
+  try {
+    const rec = await PigeonKeystore.getTopicKey(topic);
+    if (!rec || !rec.passphrase) return false;
+    const key = await PigeonCrypto.deriveKey(rec.passphrase, meta.salt, meta.iter);
+    state.topicKeys[topic] = key;
+    return true;
+  } catch (err) {
+    console.error('Failed to load topic key:', err);
+    return false;
+  }
+}
+
+// Attempts to decrypt a message in-place if it looks like an envelope and we
+// have the key. On success, replaces `msg.message`/`title`/`tags`/etc. with
+// decrypted fields and sets `msg._decrypted = true`. On failure, sets
+// `msg._locked = true` and leaves the envelope string visible.
+async function tryDecryptMessage(topic, msg) {
+  if (!isE2eeTopic(topic)) return msg;
+  const env = PigeonCrypto.parseEnvelope(msg.message);
+  if (!env) return msg; // not an envelope (e.g. plaintext published to an e2ee topic)
+  const key = state.topicKeys[topic];
+  if (!key) {
+    msg._locked = true;
+    return msg;
+  }
+  try {
+    const fields = await PigeonCrypto.decryptEnvelope(key, env);
+    if (typeof fields.message === 'string') msg.message = fields.message;
+    if (typeof fields.title === 'string') msg.title = fields.title;
+    if (typeof fields.tags === 'string') msg.tags = fields.tags;
+    if (typeof fields.click === 'string') msg.click = fields.click;
+    if (typeof fields.image === 'string') msg.image = fields.image;
+    if (typeof fields.markdown === 'boolean') msg.markdown = fields.markdown;
+    msg._decrypted = true;
+  } catch (err) {
+    console.warn('Decrypt failed for message', msg.id, err);
+    msg._locked = true;
+  }
+  return msg;
+}
+
 // DOM elements
 const topicInput = document.getElementById('topic-input');
 const subscribeBtn = document.getElementById('subscribe-btn');
+const e2eeCheckbox = document.getElementById('e2ee-checkbox');
+const e2eePassphrase = document.getElementById('e2ee-passphrase');
 const topicsSection = document.getElementById('topics-section');
 const topicTabs = document.getElementById('topic-tabs');
 const messagesSection = document.getElementById('messages-section');
@@ -67,22 +127,84 @@ async function init() {
     }
   }
 
+  // Derive encryption keys for any e2ee topics whose passphrase is in IDB
+  await Promise.all(state.topics.filter(isE2eeTopic).map(loadTopicKey));
+
   state.topics.forEach(topic => connectTopic(topic));
   renderTopicTabs();
 
   if (state.topics.length > 0) {
     selectTopic(state.topics[0]);
   }
+
+  // If the URL fragment carries a share link (#topic=...&k=...&s=...&i=...),
+  // prompt the user to join. Fragments are never sent to the server.
+  await maybeJoinFromFragment();
 }
 
-// Subscribe to a topic
-subscribeBtn.addEventListener('click', () => {
+async function maybeJoinFromFragment() {
+  if (!location.hash) return;
+  const params = new URLSearchParams(location.hash.slice(1));
+  const topic = params.get('topic');
+  const k = params.get('k');
+  const s = params.get('s');
+  const i = parseInt(params.get('i') || '', 10);
+  if (!topic || !k || !s || !Number.isFinite(i)) return;
+  // Clear fragment so reloads don't re-prompt
+  history.replaceState(null, '', location.pathname + location.search);
+  if (state.topics.includes(topic) && isE2eeTopic(topic)) return;
+  const ok = window.confirm(`Join end-to-end encrypted topic "${topic}"?`);
+  if (!ok) return;
+  await subscribeToTopic(topic, { e2ee: true, passphrase: k, salt: s, iter: i });
+}
+
+// Subscribe to a topic (UI handler)
+subscribeBtn.addEventListener('click', async () => {
   const topic = topicInput.value.trim().replace(/[^a-zA-Z0-9_-]/g, '');
   if (!topic || state.topics.includes(topic)) return;
 
+  const wantE2ee = !!(e2eeCheckbox && e2eeCheckbox.checked);
+  if (wantE2ee) {
+    const passphrase = (e2eePassphrase && e2eePassphrase.value) || '';
+    if (!passphrase) {
+      window.alert('Enter a passphrase to enable end-to-end encryption.');
+      return;
+    }
+    await subscribeToTopic(topic, {
+      e2ee: true,
+      passphrase,
+      salt: PigeonCrypto.newSalt(),
+      iter: PigeonCrypto.PBKDF2_ITERATIONS,
+    });
+  } else {
+    await subscribeToTopic(topic, { e2ee: false });
+  }
+
+  topicInput.value = '';
+  if (e2eePassphrase) e2eePassphrase.value = '';
+  if (e2eeCheckbox) {
+    e2eeCheckbox.checked = false;
+    e2eeCheckbox.dispatchEvent(new Event('change'));
+  }
+});
+
+async function subscribeToTopic(topic, opts) {
+  if (state.topics.includes(topic)) return;
   state.topics.push(topic);
   state.messages[topic] = [];
   localStorage.setItem('pigeon_topics', JSON.stringify(state.topics));
+
+  if (opts && opts.e2ee) {
+    state.topicMeta[topic] = { e2ee: true, salt: opts.salt, iter: opts.iter };
+    saveTopicMeta();
+    await PigeonKeystore.putTopicKey(topic, {
+      passphrase: opts.passphrase,
+      salt: opts.salt,
+      iter: opts.iter,
+      e2ee: true,
+    });
+    await loadTopicKey(topic);
+  }
 
   connectTopic(topic);
   if (state.pushEnabled && state.pushSubscription) {
@@ -90,13 +212,39 @@ subscribeBtn.addEventListener('click', () => {
   }
   selectTopic(topic);
   renderTopicTabs();
-
-  topicInput.value = '';
-});
+}
 
 topicInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') subscribeBtn.click();
 });
+
+if (e2eeCheckbox) {
+  const updateE2eeUi = () => {
+    if (!e2eePassphrase) return;
+    e2eePassphrase.hidden = !e2eeCheckbox.checked;
+    if (e2eeCheckbox.checked) e2eePassphrase.focus();
+  };
+  e2eeCheckbox.addEventListener('change', updateE2eeUi);
+  updateE2eeUi();
+}
+
+window.shareActiveTopic = async () => {
+  const topic = state.activeTopic;
+  if (!topic || !isE2eeTopic(topic)) return;
+  const meta = state.topicMeta[topic];
+  const rec = await PigeonKeystore.getTopicKey(topic);
+  if (!rec || !rec.passphrase) return;
+  const k = encodeURIComponent(rec.passphrase);
+  const s = encodeURIComponent(meta.salt);
+  const i = meta.iter;
+  const url = `${location.origin}/#topic=${encodeURIComponent(topic)}&k=${k}&s=${s}&i=${i}`;
+  try {
+    await navigator.clipboard.writeText(url);
+    window.alert('Share link copied to clipboard.\n\nSend it via a trusted channel — anyone who opens it can read this topic.');
+  } catch {
+    window.prompt('Copy this share link:', url);
+  }
+};
 
 // Connect WebSocket for a topic
 async function connectTopic(topic) {
@@ -114,7 +262,9 @@ async function connectTopic(topic) {
     try {
       const res = await fetch(`/${topic}/json?since=all`);
       const msgs = await res.json();
-      state.messages[topic] = msgs.reverse();
+      const reversed = msgs.reverse();
+      await Promise.all(reversed.map(m => tryDecryptMessage(topic, m)));
+      state.messages[topic] = reversed;
       // Merge any messages that arrived via WS while fetching history
       let newEarly = 0;
       for (const msg of earlyMessages) {
@@ -133,9 +283,10 @@ async function connectTopic(topic) {
     } catch {}
   };
 
-  ws.onmessage = (event) => {
+  ws.onmessage = async (event) => {
     try {
       const msg = JSON.parse(event.data);
+      await tryDecryptMessage(topic, msg);
       if (!historyLoaded) {
         earlyMessages.push(msg);
         return;
@@ -193,6 +344,8 @@ function selectTopic(topic) {
   state.unreadCounts[topic] = 0;
   topicsSection.hidden = false;
   messagesSection.hidden = false;
+  const shareBtn = document.getElementById('share-topic-btn');
+  if (shareBtn) shareBtn.hidden = !isE2eeTopic(topic);
   renderTopicTabs();
   renderMessages();
 }
@@ -201,6 +354,13 @@ function removeTopic(topic) {
   disconnectTopic(topic);
   state.topics = state.topics.filter(t => t !== topic);
   localStorage.setItem('pigeon_topics', JSON.stringify(state.topics));
+
+  if (state.topicMeta[topic]) {
+    delete state.topicMeta[topic];
+    saveTopicMeta();
+  }
+  delete state.topicKeys[topic];
+  PigeonKeystore.deleteTopicKey(topic).catch(err => console.error('keystore delete:', err));
 
   if (state.activeTopic === topic) {
     state.activeTopic = state.topics[0] || null;
@@ -225,10 +385,13 @@ function renderTopicTabs() {
   topicTabs.innerHTML = state.topics
     .map(t => {
       const unread = state.unreadCounts && state.unreadCounts[t] ? `<span class="unread-badge">${state.unreadCounts[t]}</span>` : '';
+      const lockIcon = isE2eeTopic(t)
+        ? `<span class="topic-lock" title="End-to-end encrypted" aria-label="encrypted">🔒</span>`
+        : '';
       return `
       <button class="topic-tab ${t === state.activeTopic ? 'active' : ''}"
               onclick="selectTopic('${t}')">
-        ${t}${unread}<span class="remove" onclick="event.stopPropagation(); removeTopic('${t}')">×</span>
+        ${lockIcon}${t}${unread}<span class="remove" onclick="event.stopPropagation(); removeTopic('${t}')">×</span>
       </button>
     `})
     .join('');
@@ -283,6 +446,18 @@ function renderMessages() {
   messagesList.innerHTML = filterBanner + msgs
     .map(msg => {
       const time = timeAgo(new Date(msg.created_at * 1000));
+      if (msg._locked) {
+        return `
+        <div class="message-card priority-${msg.priority} locked-message">
+          <div class="msg-header">
+            <span class="msg-title">🔒 Encrypted message</span>
+            <div class="msg-header-right">
+              <span class="msg-time" data-time="${msg.created_at}">${time}</span>
+            </div>
+          </div>
+          <div class="msg-body locked-body">Enter the topic passphrase to decrypt this message.</div>
+        </div>`;
+      }
       const title = msg.title || msg.topic;
       const tags = msg.tags 
         ? `<div class="msg-tags">` + msg.tags.split(',').map(t => {
@@ -369,21 +544,43 @@ async function sendMessage() {
   const body = editor ? editor.getMarkdown().trim() : '';
   if (!body || !state.activeTopic) return;
 
-  const headers = {};
+  const topic = state.activeTopic;
   const title = composeTitle.value.trim();
-  if (title) headers['X-Title'] = title;
   const tags = composeTags ? composeTags.value.trim() : '';
-  if (tags) headers['X-Tags'] = tags;
-  headers['X-Markdown'] = '1';
-  if (composePriority) headers['X-Priority'] = composePriority.value;
+  const priority = composePriority ? composePriority.value : '3';
 
   sendBtn.disabled = true;
   try {
-    await fetch(`/${state.activeTopic}`, {
-      method: 'POST',
-      headers,
-      body,
-    });
+    if (isE2eeTopic(topic)) {
+      const key = state.topicKeys[topic];
+      if (!key) {
+        window.alert('No key loaded for this topic — cannot encrypt.');
+        return;
+      }
+      const meta = state.topicMeta[topic];
+      const fields = { title, message: body, tags, markdown: true };
+      const envelope = await PigeonCrypto.encryptFields(key, fields, meta.salt, meta.iter);
+      await fetch(`/${topic}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/vnd.pigeon.e2ee+json',
+          'X-Encrypted': '1',
+          'X-Priority': priority,
+        },
+        body: envelope,
+      });
+    } else {
+      const headers = {};
+      if (title) headers['X-Title'] = title;
+      if (tags) headers['X-Tags'] = tags;
+      headers['X-Markdown'] = '1';
+      headers['X-Priority'] = priority;
+      await fetch(`/${topic}`, {
+        method: 'POST',
+        headers,
+        body,
+      });
+    }
     if (editor) editor.setMarkdown('');
     composeTitle.value = '';
     if (composeTags) composeTags.value = '';

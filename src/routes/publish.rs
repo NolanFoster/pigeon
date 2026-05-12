@@ -10,26 +10,44 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
     validate_topic(&topic)?;
 
     let body = req.text().await?;
-    if body.len() > 8192 {
-        return Response::error("Payload Too Large: message must be <= 8KB", 413);
+    // Encrypted payloads carry a base64url ciphertext envelope inside JSON,
+    // which inflates the wire size. Allow a larger ceiling for those.
+    let headers = req.headers();
+    let content_type = headers.get("Content-Type")?.unwrap_or_default();
+    let encrypted_header = headers
+        .get("X-Encrypted")?
+        .map(|v| v == "1" || v == "true" || v == "yes")
+        .unwrap_or(false);
+    let is_encrypted = encrypted_header || content_type == "application/vnd.pigeon.e2ee+json";
+    let max_body = if is_encrypted { 16384 } else { 8192 };
+    if body.len() > max_body {
+        return Response::error("Payload Too Large", 413);
     }
 
-    let headers = req.headers();
-    let title = headers.get("X-Title")?.or(headers.get("Title")?);
     let priority: u8 = headers
         .get("X-Priority")?
         .or(headers.get("Priority")?)
         .and_then(|p| p.parse().ok())
         .unwrap_or(3)
         .clamp(1, 5);
-    let tags = headers.get("X-Tags")?.or(headers.get("Tags")?);
-    let click = headers.get("X-Click")?.or(headers.get("Click")?);
-    let image = headers.get("X-Image")?.or(headers.get("Image")?);
-    let markdown = headers
-        .get("X-Markdown")?
-        .or(headers.get("Markdown")?)
-        .map(|v| v == "1" || v == "true" || v == "yes")
-        .unwrap_or(false);
+
+    let (title, tags, click, image, markdown) = if is_encrypted {
+        // Don't honour content headers for encrypted messages — title/tags/etc.
+        // live inside the ciphertext envelope. Store a fixed placeholder title
+        // so the server-visible record is uniformly opaque.
+        (Some("[encrypted]".to_string()), None, None, None, false)
+    } else {
+        let title = headers.get("X-Title")?.or(headers.get("Title")?);
+        let tags = headers.get("X-Tags")?.or(headers.get("Tags")?);
+        let click = headers.get("X-Click")?.or(headers.get("Click")?);
+        let image = headers.get("X-Image")?.or(headers.get("Image")?);
+        let markdown = headers
+            .get("X-Markdown")?
+            .or(headers.get("Markdown")?)
+            .map(|v| v == "1" || v == "true" || v == "yes")
+            .unwrap_or(false);
+        (title, tags, click, image, markdown)
+    };
 
     let now = Date::now().as_millis() / 1000;
 
@@ -43,6 +61,7 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         click,
         image,
         markdown,
+        encrypted: is_encrypted,
         created_at: now as i64,
     };
 

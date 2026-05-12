@@ -27,6 +27,13 @@
         <input type="text" id="topic-input" placeholder="Topic name" autocomplete="off">
         <button id="subscribe-btn" class="btn btn-primary">Subscribe</button>
       </div>
+      <div class="e2ee-row">
+        <label class="e2ee-label">
+          <input type="checkbox" id="e2ee-checkbox">
+          <span>End-to-end encrypted</span>
+        </label>
+        <input type="password" id="e2ee-passphrase" class="e2ee-passphrase" placeholder="Shared passphrase" autocomplete="new-password" hidden>
+      </div>
     </section>
 
     <section id="topics-section" class="topics" hidden>
@@ -39,6 +46,7 @@
 
     <section id="messages-section" class="messages" hidden>
       <div class="messages-header">
+        <button id="share-topic-btn" class="btn btn-tertiary share-btn" onclick="shareActiveTopic()" hidden>Share encrypted link</button>
         <button id="clear-messages-btn" class="btn btn-tertiary clear-btn">Clear</button>
       </div>
       <div id="messages-list" class="messages-list"></div>
@@ -78,6 +86,8 @@
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://uicdn.toast.com/editor/latest/toastui-editor-all.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+  <script src="/keystore.js"></script>
+  <script src="/crypto.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

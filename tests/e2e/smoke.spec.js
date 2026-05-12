@@ -135,6 +135,43 @@ test('tag shortcodes render as emoji', async ({ page, request, baseURL }) => {
   await expect(page.locator('.message-card')).toHaveCount(1);
 });
 
+test('end-to-end encrypted topic: only subscribers with passphrase can read', async ({ page, request, baseURL }) => {
+  const topic = `smoke-e2ee-${Date.now()}`;
+  const passphrase = 'correct horse battery staple';
+
+  await page.goto('/');
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#e2ee-checkbox').check();
+  await page.locator('#e2ee-passphrase').fill(passphrase);
+  await page.locator('#subscribe-btn').click();
+
+  // Lock icon should appear in the active topic tab
+  await expect(page.locator('.topic-tab.active .topic-lock')).toBeVisible();
+
+  // Send a message through the compose box (encrypted client-side).
+  // Toast UI uses a contenteditable area; type into it directly.
+  await page.locator('#compose-title').fill('Secret');
+  const editorBody = page
+    .locator('#compose-editor-container .toastui-editor-md-container .ProseMirror, #compose-editor-container .ProseMirror, #compose-editor-container [contenteditable="true"]')
+    .first();
+  await editorBody.click();
+  await page.keyboard.type('top secret payload');
+  await page.locator('#send-btn').click();
+
+  const card = page.locator('.message-card').first();
+  await expect(card).toBeVisible();
+  await expect(card.locator('.msg-title')).toContainText('Secret');
+  await expect(card.locator('.msg-body')).toContainText('top secret payload');
+
+  // Hit the server directly: it must NOT contain the plaintext.
+  const raw = await request.get(`${baseURL}/${topic}/json?since=all`);
+  const body = await raw.text();
+  expect(body).not.toContain('top secret payload');
+  expect(body).not.toContain('"Secret"');
+  expect(body).toContain('"[encrypted]"');
+  expect(body).toContain('A256GCM-PBKDF2');
+});
+
 test('topics can be reordered via drag and drop', async ({ page }) => {
   await page.goto('/');
 

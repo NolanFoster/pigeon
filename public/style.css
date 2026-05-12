@@ -134,6 +134,57 @@ header h1 {
   border-color: var(--color-primary);
 }
 
+.e2ee-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.75rem;
+}
+
+.e2ee-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.e2ee-label input[type="checkbox"] {
+  accent-color: var(--color-primary);
+  width: 1rem;
+  height: 1rem;
+}
+
+.e2ee-passphrase {
+  flex: 1;
+  min-width: 12rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 0.9rem;
+  outline: none;
+}
+
+.e2ee-passphrase:focus {
+  border-color: var(--color-primary);
+}
+
+.topic-lock {
+  margin-right: 0.25rem;
+  font-size: 0.8em;
+  opacity: 0.85;
+}
+
+.locked-message .locked-body {
+  font-style: italic;
+  color: var(--color-text-muted);
+}
+
 button {
   font-family: inherit;
   cursor: pointer;

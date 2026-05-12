@@ -1,5 +1,8 @@
-const CACHE_NAME = 'pigeon-v2';
-const STATIC_ASSETS = ['/', '/style.css', '/app.js', '/manifest.json', '/badge.png'];
+/* global PigeonCrypto, PigeonKeystore */
+importScripts('/keystore.js', '/crypto.js');
+
+const CACHE_NAME = 'pigeon-v3';
+const STATIC_ASSETS = ['/', '/style.css', '/app.js', '/crypto.js', '/keystore.js', '/manifest.json', '/badge.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -61,6 +64,47 @@ function stripMarkdown(text) {
     .trim();
 }
 
+async function buildNotification(data) {
+  // If the server flagged this as encrypted, try to decrypt with the stored
+  // topic key. On any failure, fall back to a generic notification so the
+  // user still gets a heads-up.
+  if (data && data.encrypted && typeof data.ct === 'string' && data.topic) {
+    const envelope = PigeonCrypto.parseEnvelope(data.ct);
+    const rec = await PigeonKeystore.getTopicKey(data.topic).catch(() => null);
+    if (envelope && rec && rec.passphrase) {
+      try {
+        const key = await PigeonCrypto.deriveKey(rec.passphrase, rec.salt, rec.iter);
+        const fields = await PigeonCrypto.decryptEnvelope(key, envelope);
+        return {
+          title: fields.title || data.topic || 'Pigeon',
+          body: fields.markdown ? stripMarkdown(fields.message || '') : (fields.message || ''),
+          image: fields.image || undefined,
+          click: fields.click || undefined,
+          topic: data.topic,
+          id: data.id,
+        };
+      } catch (err) {
+        console.warn('SW decrypt failed:', err);
+      }
+    }
+    return {
+      title: data.topic ? `🔒 ${data.topic}` : 'Pigeon',
+      body: 'New encrypted message',
+      topic: data.topic,
+      id: data.id,
+    };
+  }
+
+  return {
+    title: data.title || data.topic || 'Pigeon',
+    body: data.markdown ? stripMarkdown(data.message || '') : (data.message || ''),
+    image: data.image || undefined,
+    click: data.click || undefined,
+    topic: data.topic,
+    id: data.id,
+  };
+}
+
 self.addEventListener('push', (event) => {
   let data = {};
   try {
@@ -69,22 +113,18 @@ self.addEventListener('push', (event) => {
     data = { message: event.data ? event.data.text() : 'New notification' };
   }
 
-  const title = data.title || data.topic || 'Pigeon';
-  let bodyText = data.message || '';
-  if (data.markdown) {
-    bodyText = stripMarkdown(bodyText);
-  }
-
-  const options = {
-    body: bodyText,
-    tag: data.id || undefined,
-    icon: '/icon-192.png',
-    badge: '/badge.png',
-    image: data.image || undefined,
-    data: { click: data.click, topic: data.topic },
-  };
-
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil((async () => {
+    const n = await buildNotification(data);
+    const options = {
+      body: n.body,
+      tag: n.id || undefined,
+      icon: '/icon-192.png',
+      badge: '/badge.png',
+      image: n.image,
+      data: { click: n.click, topic: n.topic },
+    };
+    await self.registration.showNotification(n.title, options);
+  })());
 });
 
 self.addEventListener('notificationclick', (event) => {
