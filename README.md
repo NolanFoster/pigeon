@@ -54,9 +54,25 @@ curl -H "X-Markdown: 1" \
 | `POST` | `/:topic` | Publish a message |
 | `GET` | `/:topic/json?since=<ts>` | Poll messages since Unix timestamp (`all` for all) |
 | `GET` | `/:topic/sse` | WebSocket stream of new messages |
+| `DELETE` | `/:topic/messages` | Delete all messages for a topic |
+| `DELETE` | `/:topic/messages/:id` | Delete a single message |
 | `POST` | `/:topic/push/subscribe` | Register Web Push subscription |
 | `DELETE` | `/:topic/push/subscribe` | Unregister Web Push subscription |
 | `GET` | `/vapid-key` | Get VAPID public key for push setup |
+
+### Todo lists
+
+Any topic can act as a todo list — no special endpoint, just a tag convention. Publish a message with the `todo` tag and the UI renders it with a checkbox:
+
+```bash
+curl -H "X-Tags: todo" -d "Buy milk" https://your-worker.dev/groceries
+```
+
+Checking the box publishes a `todo,done` message whose body is the original message's id. Completion state is computed by the UI from the message stream; nothing extra is stored. Mixed topics work too — non-`todo` messages render normally alongside checklist items.
+
+### Editing messages
+
+Each message card has an edit (pencil) button. Editing pre-fills the compose box with the message's title, tags, priority, and body; saving deletes the original via `DELETE /:topic/messages/:id` and publishes the new one. WebSocket subscribers receive a `{"deleted": true, "id": "..."}` event so all open clients update in real time.
 
 ## Self-Hosting
 

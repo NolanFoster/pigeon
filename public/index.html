@@ -63,7 +63,11 @@
         </div>
         <div class="compose-tags-field">
           <span class="compose-tags-prefix" aria-hidden="true">#</span>
-          <input type="text" id="compose-tags" class="compose-tags-input" placeholder="tags, comma separated" autocomplete="off">
+          <input type="text" id="compose-tags" class="compose-tags-input" placeholder="tags, comma separated (use 'todo' for a checklist item)" autocomplete="off">
+        </div>
+        <div id="compose-edit-banner" class="compose-edit-banner" hidden>
+          <span>Editing message — saving will replace the original.</span>
+          <button type="button" class="btn btn-tertiary" onclick="cancelEdit()">Cancel</button>
         </div>
         <div class="compose-editor">
           <div id="compose-editor-container"></div>
@@ -80,6 +84,8 @@
       <p>With title and priority:</p>
       <div class="code-wrapper"><button class="code-copy-btn" onclick="copyCode(this)">Copy</button><pre><code>curl -H "X-Title: Alert" -H "X-Priority: 5" \
      -d "Server is down!" https://your-worker.dev/mytopic</code></pre></div>
+      <p>As a todo (renders with a checkbox; check it in the UI to mark complete):</p>
+      <div class="code-wrapper"><button class="code-copy-btn" onclick="copyCode(this)">Copy</button><pre><code>curl -H "X-Tags: todo" -d "Buy milk" https://your-worker.dev/groceries</code></pre></div>
     </section>
   </div>
 

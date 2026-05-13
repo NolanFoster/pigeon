@@ -91,6 +91,14 @@ pub async fn delete_messages(db: &D1Database, topic: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn delete_message(db: &D1Database, topic: &str, id: &str) -> Result<()> {
+    let stmt = db.prepare("DELETE FROM messages WHERE topic = ?1 AND id = ?2");
+    stmt.bind(&[JsValue::from_str(topic), JsValue::from_str(id)])?
+        .run()
+        .await?;
+    Ok(())
+}
+
 pub async fn delete_push_subscription(
     db: &D1Database,
     topic: &str,
