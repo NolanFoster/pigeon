@@ -369,6 +369,98 @@ button {
   height: 14px;
 }
 
+.edit-btn {
+  background: transparent;
+  border: none;
+  padding: 4px;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  border-radius: var(--radius-sm);
+  transition: opacity var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+  display: flex;
+  opacity: 0.35;
+}
+
+.message-card:hover .edit-btn,
+.message-card:focus-within .edit-btn,
+.edit-btn:focus-visible {
+  opacity: 1;
+}
+
+.edit-btn:hover {
+  background: var(--color-tab-bg);
+  color: var(--color-primary);
+}
+
+.edit-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.todo-checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--color-accent-green);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  margin-right: 8px;
+  vertical-align: -3px;
+  position: relative;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.todo-checkbox:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-accent-green) 15%, transparent);
+}
+
+.todo-checkbox:checked {
+  background: var(--color-accent-green);
+}
+
+.todo-checkbox:checked::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 0px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--color-bg);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.todo-checkbox:disabled {
+  cursor: default;
+}
+
+.message-card.is-todo {
+  border-left: 3px solid var(--color-accent-green);
+}
+
+.msg-body.todo-done {
+  text-decoration: line-through;
+  opacity: 0.55;
+}
+
+.compose-edit-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+}
+
 .code-wrapper {
   position: relative;
   margin: 0.5rem 0;

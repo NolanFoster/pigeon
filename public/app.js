@@ -268,6 +268,10 @@ async function connectTopic(topic) {
       // Merge any messages that arrived via WS while fetching history
       let newEarly = 0;
       for (const msg of earlyMessages) {
+        if (msg && msg.deleted && msg.id) {
+          state.messages[topic] = state.messages[topic].filter(m => m.id !== msg.id);
+          continue;
+        }
         if (!state.messages[topic].some(m => m.id === msg.id)) {
           state.messages[topic].unshift(msg);
           newEarly++;
@@ -286,6 +290,18 @@ async function connectTopic(topic) {
   ws.onmessage = async (event) => {
     try {
       const msg = JSON.parse(event.data);
+      if (msg && msg.deleted && msg.id) {
+        if (!historyLoaded) {
+          earlyMessages.push(msg);
+          return;
+        }
+        const before = state.messages[topic].length;
+        state.messages[topic] = state.messages[topic].filter(m => m.id !== msg.id);
+        if (state.messages[topic].length !== before && state.activeTopic === topic) {
+          renderMessages();
+        }
+        return;
+      }
       await tryDecryptMessage(topic, msg);
       if (!historyLoaded) {
         earlyMessages.push(msg);
@@ -397,13 +413,33 @@ function renderTopicTabs() {
     .join('');
 }
 
+function msgTags(msg) {
+  return msg.tags ? msg.tags.split(',').map(t => t.trim()) : [];
+}
+
 function renderMessages() {
   const allMsgs = state.messages[state.activeTopic] || [];
-  let msgs = [...allMsgs];
-  
+
+  // Todo convention: a message with tags `todo,done` whose body is an existing
+  // message id marks that message as complete. We hide the marker itself from
+  // the list and only render the original todo with a checked checkbox.
+  const doneIds = new Set();
+  for (const m of allMsgs) {
+    const tags = msgTags(m);
+    if (tags.includes('todo') && tags.includes('done')) {
+      const ref = (m.message || '').trim();
+      if (ref) doneIds.add(ref);
+    }
+  }
+
+  let msgs = allMsgs.filter(m => {
+    const tags = msgTags(m);
+    return !(tags.includes('todo') && tags.includes('done'));
+  });
+
   // Extract all unique tags for the current topic to show as quick-filters
   const uniqueTags = Array.from(new Set(
-    allMsgs.flatMap(m => m.tags ? m.tags.split(',').map(t => t.trim()) : [])
+    msgs.flatMap(m => msgTags(m))
   )).sort();
 
   const filterBanner = state.filterTag 
@@ -459,37 +495,48 @@ function renderMessages() {
         </div>`;
       }
       const title = msg.title || msg.topic;
-      const tags = msg.tags 
+      const tagList = msgTags(msg);
+      const isTodo = tagList.includes('todo');
+      const isDone = isTodo && doneIds.has(msg.id);
+      const tags = msg.tags
         ? `<div class="msg-tags">` + msg.tags.split(',').map(t => {
             const raw = t.trim();
             return `<span class="tag-chip" onclick="setFilterTag('${escapeHtml(raw)}')">${escapeHtml(emojifyTag(raw))}</span>`;
           }).join('') + `</div>`
         : '';
-      
+
       let icon = '';
       if (msg.priority === 5) icon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: text-bottom;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`;
       else if (msg.priority === 4) icon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: text-bottom;"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>`;
       else if (msg.priority === 3) icon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: text-bottom;"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>`;
-      
+
       const priorityLabel = msg.priority >= 3
         ? `<span class="msg-priority-badge">${icon}P${msg.priority}</span>`
         : '';
       const image = msg.image ? `<div class="msg-image"><img src="${escapeHtml(msg.image)}" alt="" loading="lazy"></div>` : '';
-      
+
       const copyIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+      const editIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path></svg>`;
+
+      const todoCheckbox = isTodo
+        ? `<input type="checkbox" class="todo-checkbox" ${isDone ? 'checked' : ''} ${isDone ? 'disabled' : ''} onclick="toggleTodo('${msg.id}', '${msg.topic}', ${isDone})" title="${isDone ? 'Completed' : 'Mark complete'}">`
+        : '';
 
       return `
-        <div class="message-card priority-${msg.priority}">
+        <div class="message-card priority-${msg.priority}${isTodo ? ' is-todo' : ''}${isDone ? ' is-done' : ''}">
           <div class="msg-header">
-            <span class="msg-title">${escapeHtml(title)}${priorityLabel}</span>
+            <span class="msg-title">${todoCheckbox}${escapeHtml(title)}${priorityLabel}</span>
             <div class="msg-header-right">
               <span class="msg-time" data-time="${msg.created_at}">${time}</span>
+              <button class="edit-btn" title="Edit message" onclick="editMessage('${msg.id}')">
+                ${editIcon}
+              </button>
               <button class="copy-btn" title="Copy message" onclick="copyMessage('${msg.id}', this)">
                 ${copyIcon}
               </button>
             </div>
           </div>
-          <div class="msg-body">${msg.markdown ? renderMarkdown(msg.message) : escapeHtml(msg.message)}</div>
+          <div class="msg-body${isDone ? ' todo-done' : ''}">${msg.markdown ? renderMarkdown(msg.message) : escapeHtml(msg.message)}</div>
           ${image}
           ${tags}
         </div>
@@ -508,11 +555,76 @@ window.clearFilterTag = () => {
   renderMessages();
 };
 
+window.toggleTodo = async (id, topic, done) => {
+  if (done) return;
+  try {
+    if (isE2eeTopic(topic)) {
+      const key = state.topicKeys[topic];
+      if (!key) {
+        window.alert('No key loaded for this topic — cannot mark complete.');
+        return;
+      }
+      const meta = state.topicMeta[topic];
+      const envelope = await PigeonCrypto.encryptFields(
+        key,
+        { message: id, tags: 'todo,done' },
+        meta.salt,
+        meta.iter,
+      );
+      await fetch(`/${topic}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/vnd.pigeon.e2ee+json',
+          'X-Encrypted': '1',
+        },
+        body: envelope,
+      });
+      return;
+    }
+    await fetch(`/${topic}`, {
+      method: 'POST',
+      headers: { 'X-Tags': 'todo,done' },
+      body: id,
+    });
+  } catch (err) {
+    console.error('toggleTodo failed:', err);
+  }
+};
+
+window.editMessage = (id) => {
+  const msgs = state.messages[state.activeTopic] || [];
+  const msg = msgs.find(m => m.id === id);
+  if (!msg) return;
+
+  state.editing = { id: msg.id, topic: msg.topic };
+  composeTitle.value = msg.title || '';
+  if (composeTags) composeTags.value = msg.tags || '';
+  if (composePriority) composePriority.value = String(msg.priority || 3);
+  if (editor) editor.setMarkdown(msg.message || '');
+
+  sendBtn.textContent = 'Save';
+  composeEditBanner.hidden = false;
+
+  const composeEl = document.querySelector('.compose');
+  if (composeEl) composeEl.scrollIntoView({ behavior: 'smooth', block: 'end' });
+};
+
+window.cancelEdit = () => {
+  state.editing = null;
+  composeTitle.value = '';
+  if (composeTags) composeTags.value = '';
+  if (composePriority) composePriority.value = '3';
+  if (editor) editor.setMarkdown('');
+  sendBtn.textContent = 'Send';
+  composeEditBanner.hidden = true;
+};
+
 // Send message from compose form
 const composeTitle = document.getElementById('compose-title');
 const composeTags = document.getElementById('compose-tags');
 const composePriority = document.getElementById('compose-priority');
 const sendBtn = document.getElementById('send-btn');
+const composeEditBanner = document.getElementById('compose-edit-banner');
 
 let editor = null;
 if (typeof toastui !== 'undefined' && toastui.Editor) {
@@ -549,6 +661,8 @@ async function sendMessage() {
   const tags = composeTags ? composeTags.value.trim() : '';
   const priority = composePriority ? composePriority.value : '3';
 
+  const editing = state.editing;
+
   sendBtn.disabled = true;
   try {
     if (isE2eeTopic(topic)) {
@@ -556,6 +670,9 @@ async function sendMessage() {
       if (!key) {
         window.alert('No key loaded for this topic — cannot encrypt.');
         return;
+      }
+      if (editing) {
+        await fetch(`/${editing.topic}/messages/${editing.id}`, { method: 'DELETE' });
       }
       const meta = state.topicMeta[topic];
       const fields = { title, message: body, tags, markdown: true };
@@ -570,6 +687,9 @@ async function sendMessage() {
         body: envelope,
       });
     } else {
+      if (editing) {
+        await fetch(`/${editing.topic}/messages/${editing.id}`, { method: 'DELETE' });
+      }
       const headers = {};
       if (title) headers['X-Title'] = title;
       if (tags) headers['X-Tags'] = tags;
@@ -584,6 +704,11 @@ async function sendMessage() {
     if (editor) editor.setMarkdown('');
     composeTitle.value = '';
     if (composeTags) composeTags.value = '';
+    if (editing) {
+      state.editing = null;
+      sendBtn.textContent = 'Send';
+      if (composeEditBanner) composeEditBanner.hidden = true;
+    }
   } catch (err) {
     console.error('Send failed:', err);
   } finally {

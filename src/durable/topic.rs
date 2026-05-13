@@ -2,8 +2,6 @@ use std::cell::RefCell;
 
 use worker::*;
 
-use crate::models::Message;
-
 #[durable_object]
 pub struct TopicRoom {
     state: State,
@@ -66,8 +64,7 @@ impl TopicRoom {
     }
 
     async fn handle_broadcast(&self, req: &mut Request) -> Result<Response> {
-        let msg: Message = req.json().await?;
-        let json = serde_json::to_string(&msg)?;
+        let json = req.text().await?;
 
         // Fan out to all connected WebSockets, remove dead ones
         self.connections.borrow_mut().retain(|ws| {
