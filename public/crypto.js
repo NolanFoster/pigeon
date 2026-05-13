@@ -16,7 +16,7 @@ const PBKDF2_ITERATIONS = 600000;
 const SALT_BYTES = 16;
 const IV_BYTES = 12;
 
-window.PigeonCrypto = (function () {
+(typeof self !== 'undefined' ? self : window).PigeonCrypto = (function () {
   function b64uEncode(buf) {
     const bytes = new Uint8Array(buf);
     let binary = '';
