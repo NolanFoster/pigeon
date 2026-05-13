@@ -26,7 +26,21 @@ pub async fn send_push_to_topic(env: &Env, msg: &Message) -> Result<()> {
     let vapid_public_key = env.var("VAPID_PUBLIC_KEY")?.to_string();
     let vapid_subject = env.var("VAPID_SUBJECT")?.to_string();
 
-    let payload = serde_json::to_vec(msg)?;
+    // For e2ee messages, ship only the opaque ciphertext envelope in the push
+    // payload. The Service Worker decrypts using a key it pulls from
+    // IndexedDB. The server never sees the plaintext.
+    let payload = if msg.encrypted {
+        serde_json::to_vec(&serde_json::json!({
+            "id": msg.id,
+            "topic": msg.topic,
+            "priority": msg.priority,
+            "encrypted": true,
+            "ct": msg.message,
+            "created_at": msg.created_at,
+        }))?
+    } else {
+        serde_json::to_vec(msg)?
+    };
 
     for sub in &subscriptions {
         match send_single_push(

@@ -132,6 +132,9 @@ impl From<MessageRow> for Message {
             click: row.click,
             image: row.image,
             markdown: row.markdown != 0,
+            // No persisted column; the client detects encryption by inspecting
+            // the envelope shape of `message`.
+            encrypted: false,
             created_at: row.created_at,
         }
     }

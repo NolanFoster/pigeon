@@ -26,8 +26,14 @@ pub struct Message {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     pub markdown: bool,
+    // True when `message` holds an opaque client-side ciphertext envelope and
+    // none of the content headers (title/tags/click/image) were honoured.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub encrypted: bool,
     pub created_at: i64,
 }
+
+fn is_false(b: &bool) -> bool { !*b }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushSubscriptionRecord {

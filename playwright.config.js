@@ -16,7 +16,10 @@ export default defineConfig({
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
   ],
   webServer: {
-    command: 'npx wrangler dev',
+    // Apply D1 migrations into the local SQLite before serving — wrangler dev
+    // does not auto-migrate, so without this the `messages` table is missing
+    // and every request that hits D1 fails with SQLITE_ERROR.
+    command: 'npx wrangler d1 migrations apply DB --local && npx wrangler dev',
     url: 'http://localhost:8787',
     reuseExistingServer: !process.env.CI,
     timeout: 300_000,
