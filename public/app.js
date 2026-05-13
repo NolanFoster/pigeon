@@ -194,24 +194,37 @@ async function subscribeToTopic(topic, opts) {
   state.messages[topic] = [];
   localStorage.setItem('pigeon_topics', JSON.stringify(state.topics));
 
-  if (opts && opts.e2ee) {
-    state.topicMeta[topic] = { e2ee: true, salt: opts.salt, iter: opts.iter };
-    saveTopicMeta();
-    await PigeonKeystore.putTopicKey(topic, {
-      passphrase: opts.passphrase,
-      salt: opts.salt,
-      iter: opts.iter,
-      e2ee: true,
-    });
-    await loadTopicKey(topic);
-  }
+  try {
+    if (opts && opts.e2ee) {
+      state.topicMeta[topic] = { e2ee: true, salt: opts.salt, iter: opts.iter };
+      saveTopicMeta();
+      await PigeonKeystore.putTopicKey(topic, {
+        passphrase: opts.passphrase,
+        salt: opts.salt,
+        iter: opts.iter,
+        e2ee: true,
+      });
+      await loadTopicKey(topic);
+    }
 
-  connectTopic(topic);
-  if (state.pushEnabled && state.pushSubscription) {
-    registerPushForTopic(topic, state.pushSubscription);
+    connectTopic(topic);
+    if (state.pushEnabled && state.pushSubscription) {
+      registerPushForTopic(topic, state.pushSubscription);
+    }
+    selectTopic(topic);
+    renderTopicTabs();
+  } catch (err) {
+    state.topics = state.topics.filter(t => t !== topic);
+    delete state.messages[topic];
+    delete state.topicMeta[topic];
+    delete state.topicKeys[topic];
+    localStorage.setItem('pigeon_topics', JSON.stringify(state.topics));
+    saveTopicMeta();
+    PigeonKeystore.deleteTopicKey(topic).catch(() => {});
+    console.error('subscribeToTopic failed:', err);
+    window.alert(`Subscribe failed: ${err && err.message ? err.message : err}`);
+    throw err;
   }
-  selectTopic(topic);
-  renderTopicTabs();
 }
 
 topicInput.addEventListener('keydown', (e) => {

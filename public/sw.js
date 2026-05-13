@@ -1,7 +1,7 @@
 /* global PigeonCrypto, PigeonKeystore */
 importScripts('/keystore.js', '/crypto.js');
 
-const CACHE_NAME = 'pigeon-v3';
+const CACHE_NAME = 'pigeon-v4';
 const STATIC_ASSETS = ['/', '/style.css', '/app.js', '/crypto.js', '/keystore.js', '/manifest.json', '/badge.png'];
 
 self.addEventListener('install', (event) => {
@@ -12,7 +12,11 @@ self.addEventListener('install', (event) => {
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil((async () => {
+    const names = await caches.keys();
+    await Promise.all(names.filter(n => n !== CACHE_NAME).map(n => caches.delete(n)));
+    await self.clients.claim();
+  })());
 });
 
 self.addEventListener('fetch', (event) => {
