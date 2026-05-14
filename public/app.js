@@ -126,6 +126,7 @@ const messagesSection = document.getElementById('messages-section');
 const messagesList = document.getElementById('messages-list');
 const enablePushBtn = document.getElementById('enable-push-btn');
 const clearMessagesBtn = document.getElementById('clear-messages-btn');
+const clearCompletedBtn = document.getElementById('clear-completed-btn');
 
 // Delegated click handler for any [data-action] element. Replaces the inline
 // `onclick="..."` attributes the rendered HTML used to carry — those were a
@@ -160,6 +161,12 @@ document.addEventListener('click', (e) => {
       const topic = target.getAttribute('data-topic');
       const done = target.getAttribute('data-done') === '1';
       if (id && topic) toggleTodo(id, topic, done);
+      break;
+    }
+    case 'toggle-md-task': {
+      const id = target.getAttribute('data-msg-id');
+      const idx = parseInt(target.getAttribute('data-task-index'), 10);
+      if (id && Number.isInteger(idx)) toggleMarkdownTask(id, idx);
       break;
     }
     case 'edit-msg': {
@@ -421,7 +428,12 @@ async function connectTopic(topic) {
         }
         const before = state.messages[topic].length;
         state.messages[topic] = state.messages[topic].filter(m => m.id !== msg.id);
-        if (state.messages[topic].length !== before && state.activeTopic === topic) {
+        // If the deleted message is currently being edited (locally or by
+        // another client), bail out of edit mode so the inline compose form
+        // doesn't get orphaned inside a slot that's about to disappear.
+        if (state.editing && state.editing.id === msg.id) {
+          cancelEdit();
+        } else if (state.messages[topic].length !== before && state.activeTopic === topic) {
           renderMessages();
         }
         return;
@@ -480,6 +492,11 @@ function disconnectTopic(topic) {
 }
 
 function selectTopic(topic) {
+  // Cancel in-progress edit when switching topics so the inline compose form
+  // doesn't get stranded in a topic the user no longer has open.
+  if (state.editing && state.editing.topic !== topic) {
+    cancelEdit();
+  }
   state.activeTopic = topic;
   state.unreadCounts[topic] = 0;
   topicsSection.hidden = false;
@@ -542,20 +559,31 @@ function msgTags(msg) {
   return msg.tags ? msg.tags.split(',').map(t => t.trim()) : [];
 }
 
-function renderMessages() {
-  const allMsgs = state.messages[state.activeTopic] || [];
-
-  // Todo convention: a message with tags `todo,done` whose body is an existing
-  // message id marks that message as complete. We hide the marker itself from
-  // the list and only render the original todo with a checked checkbox.
+// Todo convention: a message with tags `todo,done` whose body is an existing
+// message id marks that message as complete. doneIds is the set of completed
+// todo ids; markerIds is the set of marker-message ids (so we can clean them
+// up alongside their originals when clearing completed).
+function getDoneTodoIds(allMsgs) {
   const doneIds = new Set();
+  const markerIds = new Set();
   for (const m of allMsgs) {
     const tags = msgTags(m);
     if (tags.includes('todo') && tags.includes('done')) {
       const ref = (m.message || '').trim();
-      if (ref) doneIds.add(ref);
+      if (ref) {
+        doneIds.add(ref);
+        markerIds.add(m.id);
+      }
     }
   }
+  return { doneIds, markerIds };
+}
+
+function renderMessages() {
+  const allMsgs = state.messages[state.activeTopic] || [];
+
+  const { doneIds } = getDoneTodoIds(allMsgs);
+  if (clearCompletedBtn) clearCompletedBtn.hidden = doneIds.size === 0;
 
   let msgs = allMsgs.filter(m => {
     const tags = msgTags(m);
@@ -648,8 +676,14 @@ function renderMessages() {
         ? `<input type="checkbox" class="todo-checkbox" ${isDone ? 'checked' : ''} ${isDone ? 'disabled' : ''} data-action="toggle-todo" data-msg-id="${escapeAttr(msg.id)}" data-topic="${escapeAttr(msg.topic)}" data-done="${isDone ? '1' : '0'}" title="${isDone ? 'Completed' : 'Mark complete'}">`
         : '';
 
+      const editingThis = state.editing && state.editing.id === msg.id;
+      const hiddenAttr = editingThis ? ' style="display:none"' : '';
+      const slot = editingThis
+        ? `<div class="compose-slot" data-msg-id="${escapeAttr(msg.id)}"></div>`
+        : '';
+
       return `
-        <div class="message-card priority-${msg.priority}${isTodo ? ' is-todo' : ''}${isDone ? ' is-done' : ''}">
+        <div class="message-card priority-${msg.priority}${isTodo ? ' is-todo' : ''}${isDone ? ' is-done' : ''}"${hiddenAttr}>
           <div class="msg-header">
             <span class="msg-title">${todoCheckbox}${escapeHtml(title)}${priorityLabel}</span>
             <div class="msg-header-right">
@@ -662,13 +696,24 @@ function renderMessages() {
               </button>
             </div>
           </div>
-          <div class="msg-body${isDone ? ' todo-done' : ''}">${msg.markdown ? renderMarkdown(msg.message) : escapeHtml(msg.message)}</div>
+          <div class="msg-body${isDone ? ' todo-done' : ''}">${msg.markdown ? renderMarkdown(msg.message, msg.id) : escapeHtml(msg.message)}</div>
           ${image}
           ${tags}
         </div>
+        ${slot}
       `;
     })
     .join('');
+
+  // If we're editing a message, transplant the (single) compose form into the
+  // slot rendered next to that card. Otherwise make sure it's back at home.
+  if (state.editing) {
+    const slot = messagesList.querySelector(`.compose-slot[data-msg-id="${CSS.escape(state.editing.id)}"]`);
+    if (slot) mountComposeInSlot(slot);
+    else restoreComposeHome();
+  } else {
+    restoreComposeHome();
+  }
 }
 
 function setFilterTag(tag) {
@@ -717,6 +762,70 @@ async function toggleTodo(id, topic, done) {
   }
 }
 
+// Toggle the Nth `- [ ]` task in a markdown todo body. Mirrors the edit
+// pipeline (DELETE old + POST new) so the change propagates via the same
+// publish channel as any other edit. Per-message lock prevents id races
+// when the user clicks several boxes faster than the round-trip.
+async function toggleMarkdownTask(msgId, index) {
+  const topic = state.activeTopic;
+  if (!topic) return;
+  const msgs = state.messages[topic] || [];
+  const msg = msgs.find(m => m.id === msgId);
+  if (!msg || msg._toggling) return;
+
+  const re = /^(\s*[-*+]\s+)\[([ xX])\]/gm;
+  let count = 0;
+  let match;
+  let newBody = null;
+  while ((match = re.exec(msg.message)) !== null) {
+    if (count === index) {
+      const replacement = match[1] + (match[2] === ' ' ? '[x]' : '[ ]');
+      newBody = msg.message.slice(0, match.index) + replacement + msg.message.slice(match.index + match[0].length);
+      break;
+    }
+    count++;
+  }
+  if (newBody === null) return;
+
+  msg._toggling = true;
+  msg.message = newBody;
+  renderMessages();
+
+  try {
+    await fetch(`/${topic}/messages/${msg.id}`, { method: 'DELETE' });
+    if (isE2eeTopic(topic)) {
+      const key = state.topicKeys[topic];
+      if (!key) return;
+      const meta = state.topicMeta[topic];
+      const fields = {
+        title: msg.title || '',
+        message: newBody,
+        tags: msg.tags || '',
+        markdown: true,
+      };
+      const envelope = await PigeonCrypto.encryptFields(key, fields, meta.salt, meta.iter);
+      await fetch(`/${topic}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/vnd.pigeon.e2ee+json',
+          'X-Encrypted': '1',
+          'X-Priority': String(msg.priority || 3),
+        },
+        body: envelope,
+      });
+    } else {
+      const headers = { 'X-Markdown': '1', 'X-Priority': String(msg.priority || 3) };
+      if (msg.title) headers['X-Title'] = msg.title;
+      if (msg.tags) headers['X-Tags'] = msg.tags;
+      await fetch(`/${topic}`, { method: 'POST', headers, body: newBody });
+    }
+  } catch (err) {
+    console.error('toggleMarkdownTask failed:', err);
+  } finally {
+    msg._toggling = false;
+  }
+}
+
 function editMessage(id) {
   const msgs = state.messages[state.activeTopic] || [];
   const msg = msgs.find(m => m.id === id);
@@ -731,8 +840,9 @@ function editMessage(id) {
   sendBtn.textContent = 'Save';
   composeEditBanner.hidden = false;
 
-  const composeEl = document.querySelector('.compose');
-  if (composeEl) composeEl.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  // Re-render to inject the inline slot and transplant the compose form into it.
+  renderMessages();
+  if (composeEl) composeEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 function cancelEdit() {
@@ -743,6 +853,8 @@ function cancelEdit() {
   if (editor) editor.setMarkdown('');
   sendBtn.textContent = 'Send';
   composeEditBanner.hidden = true;
+  // renderMessages restores the compose form to its home and un-hides the card.
+  renderMessages();
 }
 
 // Send message from compose form
@@ -751,6 +863,20 @@ const composeTags = document.getElementById('compose-tags');
 const composePriority = document.getElementById('compose-priority');
 const sendBtn = document.getElementById('send-btn');
 const composeEditBanner = document.getElementById('compose-edit-banner');
+const composeEl = document.querySelector('.compose');
+// Original parent of `.compose`, captured at startup so we can return the
+// form home after it gets transplanted into an inline edit slot.
+const composeHome = composeEl ? composeEl.parentElement : null;
+
+function mountComposeInSlot(slot) {
+  if (!composeEl || !slot) return;
+  if (composeEl.parentElement !== slot) slot.appendChild(composeEl);
+}
+
+function restoreComposeHome() {
+  if (!composeEl || !composeHome) return;
+  if (composeEl.parentElement !== composeHome) composeHome.appendChild(composeEl);
+}
 
 let editor = null;
 if (typeof toastui !== 'undefined' && toastui.Editor) {
@@ -834,6 +960,9 @@ async function sendMessage() {
       state.editing = null;
       sendBtn.textContent = 'Send';
       if (composeEditBanner) composeEditBanner.hidden = true;
+      // Re-render to restore the compose form home and un-hide the edited card.
+      // The pending DELETE will remove the card moments later via the WS event.
+      renderMessages();
     }
   } catch (err) {
     console.error('Send failed:', err);
@@ -849,6 +978,29 @@ clearMessagesBtn.addEventListener('click', async () => {
   state.messages[state.activeTopic] = [];
   renderMessages();
 });
+
+// Clear only completed todos (originals + their done-marker messages). Each
+// DELETE broadcasts a `deleted` event from the worker, so other tabs sync.
+if (clearCompletedBtn) {
+  clearCompletedBtn.addEventListener('click', async () => {
+    const topic = state.activeTopic;
+    if (!topic) return;
+    const all = state.messages[topic] || [];
+    const { doneIds, markerIds } = getDoneTodoIds(all);
+    const ids = [...doneIds, ...markerIds];
+    if (ids.length === 0) return;
+    if (doneIds.size > 3 && !confirm(`Delete ${doneIds.size} completed task(s)?`)) return;
+
+    clearCompletedBtn.disabled = true;
+    try {
+      await Promise.all(ids.map(id =>
+        fetch(`/${topic}/messages/${id}`, { method: 'DELETE' })
+      ));
+    } finally {
+      clearCompletedBtn.disabled = false;
+    }
+  });
+}
 
 // Push notification helpers
 async function registerPushForTopic(topic, subscription) {
@@ -995,14 +1147,28 @@ function sanitizeMarkdownHtml(html) {
   return null;
 }
 
-function renderMarkdown(str) {
+function renderMarkdown(str, msgId) {
   if (typeof marked !== 'undefined') {
     const parsed = marked.parse(str);
     const clean = sanitizeMarkdownHtml(parsed);
     if (clean !== null) {
-      return clean
+      let html = clean
         .replace(/<pre><code/g, '<div class="code-wrapper"><button class="code-copy-btn" data-action="copy-code">Copy</button><pre><code')
         .replace(/<\/code><\/pre>/g, '</code></pre></div>');
+      // Replace marked's `disabled` task checkboxes with interactive ones that
+      // toggle the corresponding `- [ ]` in the markdown source via republish.
+      // Done after sanitization since DOMPurify lets `<input type="checkbox">`
+      // and `data-*` attributes through.
+      if (msgId) {
+        let taskIdx = 0;
+        const safeId = escapeAttr(msgId);
+        html = html.replace(/<input\b[^>]*\bdisabled\b[^>]*>/gi, (m) => {
+          const checked = /\bchecked\b/i.test(m);
+          const idx = taskIdx++;
+          return `<input type="checkbox" class="md-task-checkbox"${checked ? ' checked' : ''} data-action="toggle-md-task" data-msg-id="${safeId}" data-task-index="${idx}">`;
+        });
+      }
+      return html;
     }
     // Fall through to the safe minimal renderer below.
   }
