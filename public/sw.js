@@ -1,8 +1,11 @@
 /* global PigeonCrypto, PigeonKeystore */
 importScripts('/keystore.js', '/crypto.js');
 
-const CACHE_NAME = 'pigeon-v4';
-const STATIC_ASSETS = ['/', '/style.css', '/app.js', '/crypto.js', '/keystore.js', '/manifest.json', '/badge.png'];
+const CACHE_NAME = 'pigeon-v5';
+const STATIC_ASSETS = [
+  '/', '/style.css', '/app.js', '/crypto.js', '/keystore.js', '/manifest.json', '/badge.png',
+  '/vendor/marked.min.js', '/vendor/purify.min.js', '/vendor/Sortable.min.js',
+];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -135,6 +138,19 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const url = event.notification.data?.click || '/';
+  // X-Click is publisher-controlled. Some browsers historically allowed
+  // non-http(s) schemes through clients.openWindow; gate it here defensively.
+  const click = event.notification.data && event.notification.data.click;
+  let url = '/';
+  if (click) {
+    try {
+      const parsed = new URL(click, self.location.origin);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        url = parsed.href;
+      }
+    } catch {
+      // Fall back to root.
+    }
+  }
   event.waitUntil(clients.openWindow(url));
 });

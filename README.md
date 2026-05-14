@@ -155,6 +155,32 @@ Client (curl/app)                    Browser (PWA)
 +----------------------------------------------------------------------+
 ```
 
+## Security model
+
+Pigeon is intentionally simple: there is no account system, no API tokens, and
+no per-topic ACLs. Knowing a topic name is the only thing required to publish,
+read, or delete its messages. Pick unguessable names (treat them like
+capability URLs) and rotate them when they leak. If you need stronger access
+control, put Pigeon behind a reverse proxy that enforces auth — or front it
+with Cloudflare Access / WAF rate-limit rules.
+
+End-to-end encrypted topics are different: the server only sees an opaque
+ciphertext envelope and a fixed `[encrypted]` placeholder. Anyone with the
+shared passphrase can read messages; the server cannot. Share-link
+fragments (`#k=…`) embed the passphrase — send them only over a trusted
+channel and assume any recipient gains full read+write on that topic.
+
+Frontend hardening:
+
+- Markdown is parsed via `marked` and run through `DOMPurify` before render;
+  `javascript:`, `data:`, `blob:`, etc. URLs are stripped from both `href` and
+  `src` attributes.
+- All `<script>` sources are self-hosted or pinned with Subresource Integrity;
+  CSP forbids inline scripts.
+- `/:topic/push/subscribe` rejects endpoints that aren't on a recognized push
+  service (FCM, Mozilla autopush, WNS, Apple APNs) to prevent the worker from
+  becoming a generic HTTP-POST amplifier.
+
 ## License
 
 MIT

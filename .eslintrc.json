@@ -10,7 +10,8 @@
   },
   "globals": {
     "toastui": "readonly",
-    "marked": "readonly"
+    "marked": "readonly",
+    "DOMPurify": "readonly"
   },
   "rules": {
     "no-unused-vars": "off",

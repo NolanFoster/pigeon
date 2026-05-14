@@ -2,6 +2,11 @@ use std::cell::RefCell;
 
 use worker::*;
 
+// Hard cap on concurrent WebSocket connections per topic. An attacker could
+// otherwise sit on unlimited open sockets and pin DO memory. 256 leaves room
+// for legitimate multi-tab/multi-device use while bounding the worst case.
+const MAX_CONNECTIONS: usize = 256;
+
 #[durable_object]
 pub struct TopicRoom {
     state: State,
@@ -32,6 +37,10 @@ impl DurableObject for TopicRoom {
 
 impl TopicRoom {
     async fn handle_connect(&self, url: &Url) -> Result<Response> {
+        if self.connections.borrow().len() >= MAX_CONNECTIONS {
+            return Response::error("Too Many Connections", 429);
+        }
+
         let pair = WebSocketPair::new()?;
         let server = pair.server.clone();
         let client = pair.client;

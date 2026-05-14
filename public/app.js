@@ -127,8 +127,69 @@ const messagesList = document.getElementById('messages-list');
 const enablePushBtn = document.getElementById('enable-push-btn');
 const clearMessagesBtn = document.getElementById('clear-messages-btn');
 
+// Delegated click handler for any [data-action] element. Replaces the inline
+// `onclick="..."` attributes the rendered HTML used to carry — those were a
+// JS-injection surface (user-controlled fields templated into a JS string
+// literal inside an HTML attribute) and are incompatible with a strict CSP.
+document.addEventListener('click', (e) => {
+  const target = e.target.closest('[data-action]');
+  if (!target) return;
+  const action = target.getAttribute('data-action');
+  switch (action) {
+    case 'select-topic': {
+      const topic = target.getAttribute('data-topic');
+      if (topic) selectTopic(topic);
+      break;
+    }
+    case 'remove-topic': {
+      e.stopPropagation();
+      const topic = target.getAttribute('data-topic');
+      if (topic) removeTopic(topic);
+      break;
+    }
+    case 'filter-tag': {
+      const tag = target.getAttribute('data-tag');
+      if (tag) setFilterTag(tag);
+      break;
+    }
+    case 'clear-filter':
+      clearFilterTag();
+      break;
+    case 'toggle-todo': {
+      const id = target.getAttribute('data-msg-id');
+      const topic = target.getAttribute('data-topic');
+      const done = target.getAttribute('data-done') === '1';
+      if (id && topic) toggleTodo(id, topic, done);
+      break;
+    }
+    case 'edit-msg': {
+      const id = target.getAttribute('data-msg-id');
+      if (id) editMessage(id);
+      break;
+    }
+    case 'copy-msg': {
+      const id = target.getAttribute('data-msg-id');
+      if (id) copyMessage(id, target);
+      break;
+    }
+    case 'copy-code':
+      copyCode(target);
+      break;
+    case 'cancel-edit':
+      cancelEdit();
+      break;
+    case 'share-topic':
+      shareActiveTopic();
+      break;
+    default:
+      break;
+  }
+});
+
 // Open rendered-message links in a new tab so clicking them doesn't tear down
 // the SPA (WebSockets, in-memory state) and force a full reload on back-nav.
+// Also blocks non-http(s)/mailto schemes (javascript:, data:, blob:, …) as
+// defence in depth alongside DOMPurify's URI filter.
 messagesList.addEventListener('click', (e) => {
   const link = e.target.closest('a[href]');
   if (!link || !messagesList.contains(link)) return;
@@ -136,7 +197,10 @@ messagesList.addEventListener('click', (e) => {
   if (/^https?:\/\//i.test(href)) {
     e.preventDefault();
     window.open(href, '_blank', 'noopener,noreferrer');
+    return;
   }
+  if (/^mailto:/i.test(href)) return;
+  e.preventDefault();
 });
 
 // Initialize
@@ -288,7 +352,7 @@ if (e2eeCheckbox) {
   updateE2eeUi();
 }
 
-window.shareActiveTopic = async () => {
+async function shareActiveTopic() {
   const topic = state.activeTopic;
   if (!topic || !isE2eeTopic(topic)) return;
   const meta = state.topicMeta[topic];
@@ -304,7 +368,7 @@ window.shareActiveTopic = async () => {
   } catch {
     window.prompt('Copy this share link:', url);
   }
-};
+}
 
 // Connect WebSocket for a topic
 async function connectTopic(topic) {
@@ -464,10 +528,11 @@ function renderTopicTabs() {
       const lockIcon = isE2eeTopic(t)
         ? `<span class="topic-lock" title="End-to-end encrypted" aria-label="encrypted">🔒</span>`
         : '';
+      const topicAttr = escapeAttr(t);
       return `
       <button class="topic-tab ${t === state.activeTopic ? 'active' : ''}"
-              onclick="selectTopic('${t}')">
-        ${lockIcon}${t}${unread}<span class="remove" onclick="event.stopPropagation(); removeTopic('${t}')">×</span>
+              data-action="select-topic" data-topic="${topicAttr}">
+        ${lockIcon}${escapeHtml(t)}${unread}<span class="remove" data-action="remove-topic" data-topic="${topicAttr}">×</span>
       </button>
     `})
     .join('');
@@ -502,15 +567,15 @@ function renderMessages() {
     msgs.flatMap(m => msgTags(m))
   )).sort();
 
-  const filterBanner = state.filterTag 
+  const filterBanner = state.filterTag
     ? `<div class="filter-banner">
         <span>Filtering by tag: <strong>${escapeHtml(emojifyTag(state.filterTag))}</strong></span>
-        <button class="btn btn-tertiary clear-filter-btn" onclick="clearFilterTag()">Clear Filter</button>
+        <button class="btn btn-tertiary clear-filter-btn" data-action="clear-filter">Clear Filter</button>
        </div>`    : (uniqueTags.length > 0 ? `
       <div class="tags-row">
         <span class="tags-label">Filter by tag:</span>
         <div class="tags-chips-container">
-          ${uniqueTags.map(t => `<span class="tag-chip" onclick="setFilterTag('${escapeHtml(t)}')">${escapeHtml(emojifyTag(t))}</span>`).join('')}
+          ${uniqueTags.map(t => `<span class="tag-chip" data-action="filter-tag" data-tag="${escapeAttr(t)}">${escapeHtml(emojifyTag(t))}</span>`).join('')}
         </div>
       </div>
     ` : '');
@@ -533,7 +598,7 @@ function renderMessages() {
         </svg>
         <p class="empty-state-title">${state.filterTag ? 'No messages with this tag' : 'Listening for messages'}</p>
         <p class="empty-state-hint">${state.filterTag ? 'Try clearing the filter or sending a message with this tag.' : 'Use the compose area below or send one via HTTP:'}</p>
-        ${state.filterTag ? '' : `<code class="empty-state-cmd">curl -d "Hello!" ${location.origin}/${state.activeTopic}</code>`}
+        ${state.filterTag ? '' : `<code class="empty-state-cmd">curl -d "Hello!" ${escapeHtml(location.origin)}/${escapeHtml(state.activeTopic)}</code>`}
       </div>
     `;
     return;
@@ -548,7 +613,7 @@ function renderMessages() {
           <div class="msg-header">
             <span class="msg-title">🔒 Encrypted message</span>
             <div class="msg-header-right">
-              <span class="msg-time" data-time="${msg.created_at}">${time}</span>
+              <span class="msg-time" data-time="${escapeAttr(msg.created_at)}">${escapeHtml(time)}</span>
             </div>
           </div>
           <div class="msg-body locked-body">Enter the topic passphrase to decrypt this message.</div>
@@ -561,7 +626,7 @@ function renderMessages() {
       const tags = msg.tags
         ? `<div class="msg-tags">` + msg.tags.split(',').map(t => {
             const raw = t.trim();
-            return `<span class="tag-chip" onclick="setFilterTag('${escapeHtml(raw)}')">${escapeHtml(emojifyTag(raw))}</span>`;
+            return `<span class="tag-chip" data-action="filter-tag" data-tag="${escapeAttr(raw)}">${escapeHtml(emojifyTag(raw))}</span>`;
           }).join('') + `</div>`
         : '';
 
@@ -573,13 +638,14 @@ function renderMessages() {
       const priorityLabel = msg.priority >= 3
         ? `<span class="msg-priority-badge">${icon}P${msg.priority}</span>`
         : '';
-      const image = msg.image ? `<div class="msg-image"><img src="${escapeHtml(msg.image)}" alt="" loading="lazy"></div>` : '';
+      const safeImage = safeHttpUrl(msg.image);
+      const image = safeImage ? `<div class="msg-image"><img src="${escapeAttr(safeImage)}" alt="" loading="lazy"></div>` : '';
 
       const copyIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
       const editIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path></svg>`;
 
       const todoCheckbox = isTodo
-        ? `<input type="checkbox" class="todo-checkbox" ${isDone ? 'checked' : ''} ${isDone ? 'disabled' : ''} onclick="toggleTodo('${msg.id}', '${msg.topic}', ${isDone})" title="${isDone ? 'Completed' : 'Mark complete'}">`
+        ? `<input type="checkbox" class="todo-checkbox" ${isDone ? 'checked' : ''} ${isDone ? 'disabled' : ''} data-action="toggle-todo" data-msg-id="${escapeAttr(msg.id)}" data-topic="${escapeAttr(msg.topic)}" data-done="${isDone ? '1' : '0'}" title="${isDone ? 'Completed' : 'Mark complete'}">`
         : '';
 
       return `
@@ -587,11 +653,11 @@ function renderMessages() {
           <div class="msg-header">
             <span class="msg-title">${todoCheckbox}${escapeHtml(title)}${priorityLabel}</span>
             <div class="msg-header-right">
-              <span class="msg-time" data-time="${msg.created_at}">${time}</span>
-              <button class="edit-btn" title="Edit message" onclick="editMessage('${msg.id}')">
+              <span class="msg-time" data-time="${escapeAttr(msg.created_at)}">${escapeHtml(time)}</span>
+              <button class="edit-btn" title="Edit message" data-action="edit-msg" data-msg-id="${escapeAttr(msg.id)}">
                 ${editIcon}
               </button>
-              <button class="copy-btn" title="Copy message" onclick="copyMessage('${msg.id}', this)">
+              <button class="copy-btn" title="Copy message" data-action="copy-msg" data-msg-id="${escapeAttr(msg.id)}">
                 ${copyIcon}
               </button>
             </div>
@@ -605,17 +671,17 @@ function renderMessages() {
     .join('');
 }
 
-window.setFilterTag = (tag) => {
+function setFilterTag(tag) {
   state.filterTag = tag;
   renderMessages();
-};
+}
 
-window.clearFilterTag = () => {
+function clearFilterTag() {
   state.filterTag = null;
   renderMessages();
-};
+}
 
-window.toggleTodo = async (id, topic, done) => {
+async function toggleTodo(id, topic, done) {
   if (done) return;
   try {
     if (isE2eeTopic(topic)) {
@@ -649,9 +715,9 @@ window.toggleTodo = async (id, topic, done) => {
   } catch (err) {
     console.error('toggleTodo failed:', err);
   }
-};
+}
 
-window.editMessage = (id) => {
+function editMessage(id) {
   const msgs = state.messages[state.activeTopic] || [];
   const msg = msgs.find(m => m.id === id);
   if (!msg) return;
@@ -667,9 +733,9 @@ window.editMessage = (id) => {
 
   const composeEl = document.querySelector('.compose');
   if (composeEl) composeEl.scrollIntoView({ behavior: 'smooth', block: 'end' });
-};
+}
 
-window.cancelEdit = () => {
+function cancelEdit() {
   state.editing = null;
   composeTitle.value = '';
   if (composeTags) composeTags.value = '';
@@ -677,7 +743,7 @@ window.cancelEdit = () => {
   if (editor) editor.setMarkdown('');
   sendBtn.textContent = 'Send';
   composeEditBanner.hidden = true;
-};
+}
 
 // Send message from compose form
 const composeTitle = document.getElementById('compose-title');
@@ -880,22 +946,70 @@ function emojifyTag(tag) {
   return EMOJI_SHORTCODES[key] || tag;
 }
 
+// Escapes &, <, > only — safe for HTML text content. Do NOT use inside HTML
+// attribute values or JS string literals; use escapeAttr there instead.
 function escapeHtml(str) {
   const div = document.createElement('div');
-  div.textContent = str;
+  div.textContent = str == null ? '' : String(str);
   return div.innerHTML;
+}
+
+// Escapes everything that could break out of a double-quoted HTML attribute.
+function escapeAttr(str) {
+  return String(str == null ? '' : str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/`/g, '&#96;');
+}
+
+// Returns the URL string if it parses to http(s)/mailto; otherwise null.
+// Used to gate `<img src>` and `<a href>` targets from publisher-controlled
+// headers (X-Image, X-Click) and markdown links.
+function safeHttpUrl(str) {
+  if (typeof str !== 'string' || !str) return null;
+  try {
+    const u = new URL(str, location.origin);
+    if (u.protocol === 'http:' || u.protocol === 'https:' || u.protocol === 'mailto:') {
+      return u.href;
+    }
+  } catch {
+    // fall through
+  }
+  return null;
+}
+
+function sanitizeMarkdownHtml(html) {
+  if (typeof DOMPurify !== 'undefined') {
+    return DOMPurify.sanitize(html, {
+      USE_PROFILES: { html: true },
+      FORBID_TAGS: ['style', 'iframe', 'object', 'embed', 'form', 'svg', 'math'],
+      FORBID_ATTR: ['style'],
+      ALLOWED_URI_REGEXP: /^(?:https?|mailto):/i,
+    });
+  }
+  // No sanitizer available — refuse to render untrusted HTML at all. The
+  // caller's input is escaped and shown literally instead.
+  return null;
 }
 
 function renderMarkdown(str) {
   if (typeof marked !== 'undefined') {
-    const html = marked.parse(str);
-    // Expert UI touch: Inject copy buttons into code blocks
-    return html.replace(/<pre><code/g, '<div class="code-wrapper"><button class="code-copy-btn" onclick="copyCode(this)">Copy</button><pre><code').replace(/<\/code><\/pre>/g, '</code></pre></div>');
+    const parsed = marked.parse(str);
+    const clean = sanitizeMarkdownHtml(parsed);
+    if (clean !== null) {
+      return clean
+        .replace(/<pre><code/g, '<div class="code-wrapper"><button class="code-copy-btn" data-action="copy-code">Copy</button><pre><code')
+        .replace(/<\/code><\/pre>/g, '</code></pre></div>');
+    }
+    // Fall through to the safe minimal renderer below.
   }
-  
+
   let html = escapeHtml(str);
   // Code blocks: ```...```
-  html = html.replace(/```([\s\S]*?)```/g, '<div class="code-wrapper"><button class="code-copy-btn" onclick="copyCode(this)">Copy</button><pre><code>$1</code></pre></div>');
+  html = html.replace(/```([\s\S]*?)```/g, '<div class="code-wrapper"><button class="code-copy-btn" data-action="copy-code">Copy</button><pre><code>$1</code></pre></div>');
   // Inline code: `...`
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
   // Bold: **...**
@@ -903,14 +1017,14 @@ function renderMarkdown(str) {
   // Italic: _..._ or *...*
   html = html.replace(/\b_(.+?)_\b/g, '<em>$1</em>');
   html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-  // Links: [text](url)
+  // Links: [text](url) — http(s) only.
   html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   // Line breaks
   html = html.replace(/\n/g, '<br>');
   return html;
 }
 
-window.copyCode = (btn) => {
+function copyCode(btn) {
   const code = btn.nextElementSibling.querySelector('code').innerText;
   navigator.clipboard.writeText(code).then(() => {
     const original = btn.innerText;
@@ -921,9 +1035,9 @@ window.copyCode = (btn) => {
       btn.classList.remove('copied');
     }, 1600);
   });
-};
+}
 
-window.copyMessage = (id, btn) => {
+function copyMessage(id, btn) {
   const msgs = state.messages[state.activeTopic] || [];
   const msg = msgs.find(m => m.id === id);
   if (!msg) return;
@@ -937,7 +1051,7 @@ window.copyMessage = (id, btn) => {
       btn.classList.remove('copied');
     }, 1600);
   });
-};
+}
 
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);

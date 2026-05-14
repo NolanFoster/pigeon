@@ -1,4 +1,3 @@
-/* global TextEncoder, TextDecoder */
 // WebCrypto envelope for end-to-end encrypted topic messages.
 //
 // Envelope shape (JSON, base64url fields, stored verbatim in messages.message):
