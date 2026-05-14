@@ -580,6 +580,13 @@ function getDoneTodoIds(allMsgs) {
 }
 
 function renderMessages() {
+  // Pull the compose form out of messagesList BEFORE we wipe innerHTML, so
+  // it survives the wipe even if it was previously transplanted into an
+  // inline edit slot. We'll place it correctly again at the end.
+  if (composeEl && messagesList.contains(composeEl)) {
+    composeHome.appendChild(composeEl);
+  }
+
   const allMsgs = state.messages[state.activeTopic] || [];
 
   const { doneIds } = getDoneTodoIds(allMsgs);
@@ -629,6 +636,7 @@ function renderMessages() {
         ${state.filterTag ? '' : `<code class="empty-state-cmd">curl -d "Hello!" ${escapeHtml(location.origin)}/${escapeHtml(state.activeTopic)}</code>`}
       </div>
     `;
+    placeCompose();
     return;
   }
 
@@ -705,15 +713,25 @@ function renderMessages() {
     })
     .join('');
 
-  // If we're editing a message, transplant the (single) compose form into the
-  // slot rendered next to that card. Otherwise make sure it's back at home.
+  placeCompose();
+}
+
+// Move the compose form to its correct location after a render. If we're
+// editing and a slot for that message exists in the freshly-rendered HTML,
+// transplant compose into it; otherwise restore it to its home parent. The
+// caller guarantees compose is not inside messagesList when this runs
+// (renderMessages pulls it out before the innerHTML wipe), so this only ever
+// does at most one DOM move per render.
+function placeCompose() {
+  if (!composeEl || !composeHome) return;
   if (state.editing) {
     const slot = messagesList.querySelector(`.compose-slot[data-msg-id="${CSS.escape(state.editing.id)}"]`);
-    if (slot) mountComposeInSlot(slot);
-    else restoreComposeHome();
-  } else {
-    restoreComposeHome();
+    if (slot) {
+      if (composeEl.parentElement !== slot) slot.appendChild(composeEl);
+      return;
+    }
   }
+  if (composeEl.parentElement !== composeHome) composeHome.appendChild(composeEl);
 }
 
 function setFilterTag(tag) {
@@ -867,16 +885,6 @@ const composeEl = document.querySelector('.compose');
 // Original parent of `.compose`, captured at startup so we can return the
 // form home after it gets transplanted into an inline edit slot.
 const composeHome = composeEl ? composeEl.parentElement : null;
-
-function mountComposeInSlot(slot) {
-  if (!composeEl || !slot) return;
-  if (composeEl.parentElement !== slot) slot.appendChild(composeEl);
-}
-
-function restoreComposeHome() {
-  if (!composeEl || !composeHome) return;
-  if (composeEl.parentElement !== composeHome) composeHome.appendChild(composeEl);
-}
 
 let editor = null;
 if (typeof toastui !== 'undefined' && toastui.Editor) {
