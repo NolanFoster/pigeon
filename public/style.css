@@ -447,6 +447,52 @@ button {
   opacity: 0.55;
 }
 
+.msg-body .md-task-checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--color-accent-green);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  margin-right: 6px;
+  vertical-align: -2px;
+  position: relative;
+  pointer-events: auto;
+}
+
+.msg-body .md-task-checkbox:hover {
+  background: color-mix(in srgb, var(--color-accent-green) 15%, transparent);
+}
+
+.msg-body .md-task-checkbox:checked {
+  background: var(--color-accent-green);
+}
+
+.msg-body .md-task-checkbox:checked::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: -1px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--color-bg);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* Inline edit slot: the compose form gets transplanted here while editing,
+   visually nested under the card being modified. */
+.compose-slot {
+  margin: 0.25rem 0 1rem;
+}
+
+.compose-slot .compose {
+  border-left: 3px solid var(--color-accent-green);
+  padding-left: 0.75rem;
+}
+
 .compose-edit-banner {
   display: flex;
   align-items: center;
