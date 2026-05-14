@@ -14,13 +14,17 @@ const KEYSTORE_JS: &str = include_str!("../public/keystore.js");
 const STYLE_CSS: &str = include_str!("../public/style.css");
 const SW_JS: &str = include_str!("../public/sw.js");
 const MANIFEST_JSON: &str = include_str!("../public/manifest.json");
-// Pinned, self-hosted third-party JS. Self-hosting eliminates CDN-compromise
+// Pinned, self-hosted third-party JS/CSS. Self-hosting eliminates CDN-compromise
 // XSS, allows a strict `script-src 'self'` CSP, and avoids leaking visitor IPs
 // to third parties. Pinned versions: marked 11.1.1, DOMPurify 3.2.4,
-// SortableJS 1.15.2.
+// SortableJS 1.15.2, Toast UI Editor 3.2.2.
 const MARKED_JS: &str = include_str!("../public/vendor/marked.min.js");
 const DOMPURIFY_JS: &str = include_str!("../public/vendor/purify.min.js");
 const SORTABLE_JS: &str = include_str!("../public/vendor/Sortable.min.js");
+const TOASTUI_EDITOR_JS: &str = include_str!("../public/vendor/toastui-editor-all.min.js");
+const TOASTUI_EDITOR_CSS: &str = include_str!("../public/vendor/toastui-editor.min.css");
+const TOASTUI_EDITOR_DARK_CSS: &str =
+    include_str!("../public/vendor/toastui-editor-dark.min.css");
 const ICON_192: &[u8] = include_bytes!("../public/icon-192.png");
 const ICON_512: &[u8] = include_bytes!("../public/icon-512.png");
 const SCREENSHOT_WIDE: &[u8] = include_bytes!("../public/screenshot-wide.png");
@@ -29,12 +33,12 @@ const FAVICON: &[u8] = include_bytes!("../public/favicon.png");
 const LOGO: &[u8] = include_bytes!("../public/logo.png");
 const BADGE: &[u8] = include_bytes!("../public/badge.png");
 
-// CSP: scripts come from self plus the pinned (SRI-protected) Toast UI Editor
-// origin. Inline styles are allowed because Toast UI Editor injects them at
-// runtime; nothing in our own code requires 'unsafe-inline' for scripts.
+// CSP: scripts and styles all come from self. Inline styles are allowed
+// because Toast UI Editor injects them at runtime; nothing in our own code
+// requires 'unsafe-inline' for scripts.
 const CSP: &str = "default-src 'self'; \
-script-src 'self' https://uicdn.toast.com; \
-style-src 'self' 'unsafe-inline' https://uicdn.toast.com https://fonts.googleapis.com; \
+script-src 'self'; \
+style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
 font-src 'self' https://fonts.gstatic.com data:; \
 img-src 'self' data: https:; \
 connect-src 'self' wss: https:; \
@@ -105,6 +109,15 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         "/vendor/marked.min.js" => return serve_static(MARKED_JS, "application/javascript; charset=utf-8"),
         "/vendor/purify.min.js" => return serve_static(DOMPURIFY_JS, "application/javascript; charset=utf-8"),
         "/vendor/Sortable.min.js" => return serve_static(SORTABLE_JS, "application/javascript; charset=utf-8"),
+        "/vendor/toastui-editor-all.min.js" => {
+            return serve_static(TOASTUI_EDITOR_JS, "application/javascript; charset=utf-8")
+        }
+        "/vendor/toastui-editor.min.css" => {
+            return serve_static(TOASTUI_EDITOR_CSS, "text/css; charset=utf-8")
+        }
+        "/vendor/toastui-editor-dark.min.css" => {
+            return serve_static(TOASTUI_EDITOR_DARK_CSS, "text/css; charset=utf-8")
+        }
         "/favicon.ico" | "/favicon.png" | "/icon-192.png" | "/icon-512.png" | "/screenshot-wide.png" | "/screenshot-narrow.png" | "/logo.png" | "/badge.png" => {
             let data = match path.as_str() {
                 "/favicon.ico" | "/favicon.png" => FAVICON,
