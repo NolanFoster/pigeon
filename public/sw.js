@@ -77,7 +77,9 @@ async function buildNotification(data) {
     const rec = await PigeonKeystore.getTopicKey(data.topic).catch(() => null);
     if (envelope && rec && rec.passphrase) {
       try {
-        const key = await PigeonCrypto.deriveKey(rec.passphrase, rec.salt, rec.iter);
+        // Derive from the envelope's own kdf so a manual resubscribe (which
+        // mints a fresh local salt) still decrypts pushes encrypted earlier.
+        const key = await PigeonCrypto.deriveKey(rec.passphrase, envelope.kdf.salt, envelope.kdf.iter);
         const fields = await PigeonCrypto.decryptEnvelope(key, envelope);
         return {
           title: fields.title || data.topic || 'Pigeon',

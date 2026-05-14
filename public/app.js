@@ -3,8 +3,12 @@ const state = {
   topics: JSON.parse(localStorage.getItem('pigeon_topics') || '[]'),
   // topicMeta[name] = { e2ee, salt, iter } — encryption config persisted alongside topics
   topicMeta: JSON.parse(localStorage.getItem('pigeon_topic_meta') || '{}'),
-  // topicKeys[name] = CryptoKey (in-memory; derived from passphrase + meta)
+  // topicKeys[name] = CryptoKey for encrypting outgoing messages with meta.salt/iter
   topicKeys: {},
+  // passphrases[name] = string — cached so decryption can re-derive per envelope
+  passphrases: {},
+  // decryptKeyCache["topic|salt|iter"] = CryptoKey, keyed by the envelope's kdf params
+  decryptKeyCache: {},
   activeTopic: null,
   messages: {},       // topic -> Message[]
   eventSources: {},   // topic -> { ws, heartbeatId }
@@ -22,7 +26,8 @@ function isE2eeTopic(topic) {
   return !!(state.topicMeta[topic] && state.topicMeta[topic].e2ee);
 }
 
-// Loads stored passphrase from IDB and derives an AES-GCM key for the topic.
+// Loads stored passphrase from IDB, caches it for per-envelope decryption,
+// and derives an encryption key for the topic's local meta.salt/iter.
 // Returns true on success.
 async function loadTopicKey(topic) {
   const meta = state.topicMeta[topic];
@@ -30,6 +35,7 @@ async function loadTopicKey(topic) {
   try {
     const rec = await PigeonKeystore.getTopicKey(topic);
     if (!rec || !rec.passphrase) return false;
+    state.passphrases[topic] = rec.passphrase;
     const key = await PigeonCrypto.deriveKey(rec.passphrase, meta.salt, meta.iter);
     state.topicKeys[topic] = key;
     return true;
@@ -39,20 +45,61 @@ async function loadTopicKey(topic) {
   }
 }
 
-// Attempts to decrypt a message in-place if it looks like an envelope and we
-// have the key. On success, replaces `msg.message`/`title`/`tags`/etc. with
-// decrypted fields and sets `msg._decrypted = true`. On failure, sets
-// `msg._locked = true` and leaves the envelope string visible.
+// Looks up the cached passphrase, falling back to IDB. Returns null if unknown.
+async function getTopicPassphrase(topic) {
+  if (state.passphrases[topic]) return state.passphrases[topic];
+  try {
+    const rec = await PigeonKeystore.getTopicKey(topic);
+    if (rec && rec.passphrase) {
+      state.passphrases[topic] = rec.passphrase;
+      return rec.passphrase;
+    }
+  } catch (err) {
+    console.warn('passphrase lookup failed:', err);
+  }
+  return null;
+}
+
+// Derives (and caches) an AES-GCM key from the envelope's own salt/iter.
+async function getDecryptKey(topic, passphrase, salt, iter) {
+  const cacheKey = `${topic}|${salt}|${iter}`;
+  const cached = state.decryptKeyCache[cacheKey];
+  if (cached) return cached;
+  const key = await PigeonCrypto.deriveKey(passphrase, salt, iter);
+  state.decryptKeyCache[cacheKey] = key;
+  return key;
+}
+
+function clearTopicCryptoState(topic) {
+  delete state.topicKeys[topic];
+  delete state.passphrases[topic];
+  const prefix = `${topic}|`;
+  for (const k of Object.keys(state.decryptKeyCache)) {
+    if (k.startsWith(prefix)) delete state.decryptKeyCache[k];
+  }
+}
+
+// Attempts to decrypt a message in-place. The key is re-derived from the
+// envelope's own kdf.salt/iter so old messages still decrypt after a manual
+// resubscribe (which mints a fresh local salt). When the message is
+// ciphertext but we have no passphrase, or the envelope is malformed, sets
+// `msg._locked = true` so the UI shows a clean placeholder instead of
+// leaking raw envelope JSON.
 async function tryDecryptMessage(topic, msg) {
-  if (!isE2eeTopic(topic)) return msg;
   const env = PigeonCrypto.parseEnvelope(msg.message);
-  if (!env) return msg; // not an envelope (e.g. plaintext published to an e2ee topic)
-  const key = state.topicKeys[topic];
-  if (!key) {
+  const looksEncrypted = !!msg.encrypted || !!env;
+  if (!looksEncrypted) return msg;
+  if (!env) {
+    msg._locked = true;
+    return msg;
+  }
+  const passphrase = await getTopicPassphrase(topic);
+  if (!passphrase) {
     msg._locked = true;
     return msg;
   }
   try {
+    const key = await getDecryptKey(topic, passphrase, env.kdf.salt, env.kdf.iter);
     const fields = await PigeonCrypto.decryptEnvelope(key, env);
     if (typeof fields.message === 'string') msg.message = fields.message;
     if (typeof fields.title === 'string') msg.title = fields.title;
@@ -217,7 +264,7 @@ async function subscribeToTopic(topic, opts) {
     state.topics = state.topics.filter(t => t !== topic);
     delete state.messages[topic];
     delete state.topicMeta[topic];
-    delete state.topicKeys[topic];
+    clearTopicCryptoState(topic);
     localStorage.setItem('pigeon_topics', JSON.stringify(state.topics));
     saveTopicMeta();
     PigeonKeystore.deleteTopicKey(topic).catch(() => {});
@@ -388,7 +435,7 @@ function removeTopic(topic) {
     delete state.topicMeta[topic];
     saveTopicMeta();
   }
-  delete state.topicKeys[topic];
+  clearTopicCryptoState(topic);
   PigeonKeystore.deleteTopicKey(topic).catch(err => console.error('keystore delete:', err));
 
   if (state.activeTopic === topic) {
