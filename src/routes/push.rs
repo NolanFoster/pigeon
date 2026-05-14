@@ -1,7 +1,9 @@
 use worker::*;
 
 use crate::db;
-use crate::models::{PushSubscriptionRequest, PushUnsubscribeRequest, validate_topic};
+use crate::models::{
+    validate_push_endpoint, validate_topic, PushSubscriptionRequest, PushUnsubscribeRequest,
+};
 
 pub async fn vapid_key(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let key = ctx.var("VAPID_PUBLIC_KEY")?.to_string();
@@ -13,6 +15,12 @@ pub async fn subscribe(mut req: Request, ctx: RouteContext<()>) -> Result<Respon
     validate_topic(&topic)?;
 
     let body: PushSubscriptionRequest = req.json().await?;
+    // Refuse arbitrary endpoint URLs: only real push services. Without this
+    // the worker turns into a generic HTTP-POST amplifier (every publish
+    // triggers a signed POST to whatever URL the subscriber registered).
+    if let Err(e) = validate_push_endpoint(&body.endpoint) {
+        return Response::error(format!("invalid push endpoint: {}", e), 400);
+    }
     let d1 = ctx.d1("DB")?;
 
     let count = db::count_push_subscriptions(&d1, &topic).await?;

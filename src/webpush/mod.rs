@@ -5,7 +5,7 @@ use worker::*;
 use worker::wasm_bindgen::JsValue;
 
 use crate::db;
-use crate::models::Message;
+use crate::models::{validate_push_endpoint, Message};
 
 enum PushError {
     Gone,
@@ -43,6 +43,15 @@ pub async fn send_push_to_topic(env: &Env, msg: &Message) -> Result<()> {
     };
 
     for sub in &subscriptions {
+        // Defence in depth: rows inserted before the subscribe-time allowlist
+        // landed could still point at arbitrary URLs. Skip them.
+        if validate_push_endpoint(&sub.endpoint).is_err() {
+            console_log!("Skipping push to non-allowlisted endpoint {}", &sub.endpoint);
+            if let Err(e) = db::delete_push_subscription(&db, &msg.topic, &sub.endpoint).await {
+                console_log!("Failed to delete bad subscription: {:?}", e);
+            }
+            continue;
+        }
         match send_single_push(
             &sub.endpoint,
             &sub.p256dh,

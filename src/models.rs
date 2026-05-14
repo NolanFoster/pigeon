@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use worker::{Error, Result};
+use worker::{Error, Result, Url};
 
 pub fn validate_topic(topic: &str) -> Result<()> {
     if topic.is_empty() || topic.len() > 64 {
@@ -7,6 +7,51 @@ pub fn validate_topic(topic: &str) -> Result<()> {
     }
     if !topic.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err(Error::RustError("invalid topic characters".into()));
+    }
+    Ok(())
+}
+
+/// Hosts whose suffixes we trust to be real Web Push services. Anything else
+/// would let `/topic/push/subscribe` turn the worker into a generic HTTP-POST
+/// amplifier (an attacker registers an arbitrary URL, then every published
+/// message triggers a signed POST to it).
+const PUSH_HOST_SUFFIXES: &[&str] = &[
+    "fcm.googleapis.com",
+    "android.googleapis.com",
+    ".push.services.mozilla.com",
+    "updates.push.services.mozilla.com",
+    ".notify.windows.com",
+    ".push.apple.com",
+    "web.push.apple.com",
+    "api.push.apple.com",
+];
+
+pub fn validate_push_endpoint(endpoint: &str) -> Result<()> {
+    if endpoint.is_empty() || endpoint.len() > 512 {
+        return Err(Error::RustError("push endpoint must be 1-512 chars".into()));
+    }
+    let url = Url::parse(endpoint)
+        .map_err(|_| Error::RustError("push endpoint is not a valid URL".into()))?;
+    if url.scheme() != "https" {
+        return Err(Error::RustError("push endpoint must be https".into()));
+    }
+    let host = match url.host_str() {
+        Some(h) => h.to_ascii_lowercase(),
+        None => return Err(Error::RustError("push endpoint has no host".into())),
+    };
+    let allowed = PUSH_HOST_SUFFIXES.iter().any(|s| {
+        if let Some(stripped) = s.strip_prefix('.') {
+            // Suffix match — allow any subdomain.
+            host.ends_with(stripped) && host.len() > stripped.len() && host[..host.len() - stripped.len()].ends_with('.')
+        } else {
+            // Exact host match.
+            host == *s
+        }
+    });
+    if !allowed {
+        return Err(Error::RustError(
+            "push endpoint host is not a recognized push service".into(),
+        ));
     }
     Ok(())
 }

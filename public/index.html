@@ -12,8 +12,12 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
-  <link rel="stylesheet" href="https://uicdn.toast.com/editor/latest/toastui-editor.min.css" />
-  <link rel="stylesheet" href="https://uicdn.toast.com/editor/latest/theme/toastui-editor-dark.min.css" />
+  <link rel="stylesheet" href="https://uicdn.toast.com/editor/3.2.2/toastui-editor.min.css"
+        integrity="sha384-Uw+ry/KtbmFNRGJd+U+hpfJou1QMHCAQc8k8OdZkclgUySjn8aJJcVTkkCeSwP6H"
+        crossorigin="anonymous" />
+  <link rel="stylesheet" href="https://uicdn.toast.com/editor/3.2.2/theme/toastui-editor-dark.min.css"
+        integrity="sha384-sVw6WIm9J/uQN297I6pVzNTIZf44KjU+hr4aeWw7/a6jmwjHKJHyaqawLS4LUIq0"
+        crossorigin="anonymous" />
 </head>
 <body>
   <div class="container">
@@ -46,7 +50,7 @@
 
     <section id="messages-section" class="messages" hidden>
       <div class="messages-header">
-        <button id="share-topic-btn" class="btn btn-tertiary share-btn" onclick="shareActiveTopic()" hidden>Share encrypted link</button>
+        <button id="share-topic-btn" class="btn btn-tertiary share-btn" data-action="share-topic" hidden>Share encrypted link</button>
         <button id="clear-messages-btn" class="btn btn-tertiary clear-btn">Clear</button>
       </div>
       <div id="messages-list" class="messages-list"></div>
@@ -67,7 +71,7 @@
         </div>
         <div id="compose-edit-banner" class="compose-edit-banner" hidden>
           <span>Editing message — saving will replace the original.</span>
-          <button type="button" class="btn btn-tertiary" onclick="cancelEdit()">Cancel</button>
+          <button type="button" class="btn btn-tertiary" data-action="cancel-edit">Cancel</button>
         </div>
         <div class="compose-editor">
           <div id="compose-editor-container"></div>
@@ -80,18 +84,21 @@
 
     <section class="usage">
       <h2>Send a message</h2>
-      <div class="code-wrapper"><button class="code-copy-btn" onclick="copyCode(this)">Copy</button><pre><code>curl -d "Hello!" https://your-worker.dev/mytopic</code></pre></div>
+      <div class="code-wrapper"><button class="code-copy-btn" data-action="copy-code">Copy</button><pre><code>curl -d "Hello!" https://your-worker.dev/mytopic</code></pre></div>
       <p>With title and priority:</p>
-      <div class="code-wrapper"><button class="code-copy-btn" onclick="copyCode(this)">Copy</button><pre><code>curl -H "X-Title: Alert" -H "X-Priority: 5" \
+      <div class="code-wrapper"><button class="code-copy-btn" data-action="copy-code">Copy</button><pre><code>curl -H "X-Title: Alert" -H "X-Priority: 5" \
      -d "Server is down!" https://your-worker.dev/mytopic</code></pre></div>
       <p>As a todo (renders with a checkbox; check it in the UI to mark complete):</p>
-      <div class="code-wrapper"><button class="code-copy-btn" onclick="copyCode(this)">Copy</button><pre><code>curl -H "X-Tags: todo" -d "Buy milk" https://your-worker.dev/groceries</code></pre></div>
+      <div class="code-wrapper"><button class="code-copy-btn" data-action="copy-code">Copy</button><pre><code>curl -H "X-Tags: todo" -d "Buy milk" https://your-worker.dev/groceries</code></pre></div>
     </section>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="https://uicdn.toast.com/editor/latest/toastui-editor-all.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+  <script src="/vendor/marked.min.js"></script>
+  <script src="/vendor/purify.min.js"></script>
+  <script src="/vendor/Sortable.min.js"></script>
+  <script src="https://uicdn.toast.com/editor/3.2.2/toastui-editor-all.min.js"
+          integrity="sha384-FF8a/n4tsDcp0oRDFHNNygVDoaTZfIGmaSzvbL8wMqj/8R5sD+JKKKqfQmwJQAQY"
+          crossorigin="anonymous"></script>
   <script src="/keystore.js"></script>
   <script src="/crypto.js"></script>
   <script src="/app.js"></script>
