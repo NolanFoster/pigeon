@@ -508,6 +508,7 @@ function selectTopic(topic) {
 }
 
 function removeTopic(topic) {
+  const wasActive = state.activeTopic === topic;
   disconnectTopic(topic);
   state.topics = state.topics.filter(t => t !== topic);
   localStorage.setItem('pigeon_topics', JSON.stringify(state.topics));
@@ -519,16 +520,19 @@ function removeTopic(topic) {
   clearTopicCryptoState(topic);
   PigeonKeystore.deleteTopicKey(topic).catch(err => console.error('keystore delete:', err));
 
-  if (state.activeTopic === topic) {
-    state.activeTopic = state.topics[0] || null;
-  }
-
-  renderTopicTabs();
-  renderMessages();
-
-  if (state.topics.length === 0) {
-    topicsSection.hidden = true;
-    messagesSection.hidden = true;
+  if (wasActive) {
+    if (state.topics.length > 0) {
+      selectTopic(state.topics[0]);
+    } else {
+      state.activeTopic = null;
+      topicsSection.hidden = true;
+      messagesSection.hidden = true;
+      renderTopicTabs();
+      renderMessages();
+    }
+  } else {
+    renderTopicTabs();
+    renderMessages();
   }
 }
 
@@ -587,7 +591,24 @@ function renderMessages() {
     composeHome.appendChild(composeEl);
   }
 
-  const allMsgs = state.messages[state.activeTopic] || [];
+  const topic = state.activeTopic;
+  if (!topic) {
+    messagesList.innerHTML = `
+      <div class="empty-state">
+        <svg class="empty-state-icon" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="40" cy="40" r="32" stroke="currentColor" stroke-width="2" opacity="0.2"/>
+          <path d="M40 25v15l10 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.4"/>
+        </svg>
+        <p class="empty-state-title">No topic selected</p>
+        <p class="empty-state-hint">Select a topic from the list or subscribe to a new one.</p>
+      </div>
+    `;
+    if (clearCompletedBtn) clearCompletedBtn.hidden = true;
+    placeCompose();
+    return;
+  }
+
+  const allMsgs = state.messages[topic] || [];
 
   const { doneIds } = getDoneTodoIds(allMsgs);
   if (clearCompletedBtn) clearCompletedBtn.hidden = doneIds.size === 0;
