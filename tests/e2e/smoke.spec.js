@@ -219,3 +219,23 @@ test('topics can be reordered via drag and drop', async ({ page }) => {
   await expect(reloadedTabs.nth(1)).toContainText('topic-c');
   await expect(reloadedTabs.nth(2)).toContainText('topic-a');
 });
+
+test('topic tabs support click-to-switch and click-to-close with multiple topics', async ({ page }) => {
+  await page.goto('/');
+  for (const t of ['click-a', 'click-b', 'click-c']) {
+    await page.locator('#topic-input').fill(t);
+    await page.locator('#subscribe-btn').click();
+    await expect(page.locator('.topic-tab.active')).toContainText(t);
+  }
+
+  await page.locator('.topic-tab', { hasText: 'click-a' }).click();
+  await expect(page.locator('.topic-tab.active')).toContainText('click-a');
+
+  await page.locator('.topic-tab', { hasText: 'click-b' })
+    .locator('.remove').click();
+  await expect(page.locator('.topic-tab')).toHaveCount(2);
+  await expect(page.locator('.topic-tab.active')).toContainText('click-a');
+
+  await page.locator('.topic-tab.active').locator('.remove').click();
+  await expect(page.locator('.topic-tab')).toHaveCount(1);
+});
