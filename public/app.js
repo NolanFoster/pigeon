@@ -210,24 +210,37 @@ messagesList.addEventListener('click', (e) => {
   e.preventDefault();
 });
 
+// SortableJS holds element references and a click-suppression flag internally,
+// both of which go stale when renderTopicTabs() rewrites topicTabs.innerHTML —
+// the stale state silently swallows clicks on tabs and on the × close button.
+// We destroy and re-create the instance on every render to keep them in sync.
+let topicSortable = null;
+
+function initTopicSortable() {
+  if (typeof Sortable === 'undefined') return;
+  if (topicSortable) {
+    topicSortable.destroy();
+    topicSortable = null;
+  }
+  topicSortable = new Sortable(topicTabs, {
+    animation: 150,
+    ghostClass: 'topic-tab-ghost',
+    filter: '.remove',
+    preventOnFilter: false,
+    onEnd: function (evt) {
+      if (evt.oldIndex === evt.newIndex) return;
+
+      const itemEl = state.topics.splice(evt.oldIndex, 1)[0];
+      state.topics.splice(evt.newIndex, 0, itemEl);
+
+      localStorage.setItem('pigeon_topics', JSON.stringify(state.topics));
+      renderTopicTabs();
+    },
+  });
+}
+
 // Initialize
 async function init() {
-  if (typeof Sortable !== 'undefined') {
-    new Sortable(topicTabs, {
-      animation: 150,
-      ghostClass: 'topic-tab-ghost',
-      onEnd: function (evt) {
-        if (evt.oldIndex === evt.newIndex) return;
-
-        const itemEl = state.topics.splice(evt.oldIndex, 1)[0];
-        state.topics.splice(evt.newIndex, 0, itemEl);
-        
-        localStorage.setItem('pigeon_topics', JSON.stringify(state.topics));
-        renderTopicTabs();
-      },
-    });
-  }
-
   if ('serviceWorker' in navigator) {
     await navigator.serviceWorker.register('/sw.js');
 
@@ -539,6 +552,10 @@ function removeTopic(topic) {
 function renderTopicTabs() {
   if (state.topics.length === 0) {
     topicsSection.hidden = true;
+    if (topicSortable) {
+      topicSortable.destroy();
+      topicSortable = null;
+    }
     return;
   }
   topicsSection.hidden = false;
@@ -557,6 +574,8 @@ function renderTopicTabs() {
       </button>
     `})
     .join('');
+
+  initTopicSortable();
 }
 
 function msgTags(msg) {
