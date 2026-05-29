@@ -227,6 +227,18 @@ function initTopicSortable() {
     ghostClass: 'topic-tab-ghost',
     filter: '.remove',
     preventOnFilter: false,
+    // Sortable's native HTML5 drag (the default) puts draggable="true" on each
+    // tab, and the browser then swallows the `click` after any pointer gesture
+    // with the slightest movement — so tab-switch and × removal silently fail.
+    // forceFallback uses Sortable's own mouse/touch impl, and fallbackTolerance
+    // keeps sub-threshold presses as ordinary clicks; a real drag past ~10px
+    // still reorders. delay/delayOnTouchOnly only gate touch, so a quick tap
+    // toggles/removes on mobile while a brief hold starts a drag.
+    forceFallback: true,
+    fallbackTolerance: 10,
+    delayOnTouchOnly: true,
+    delay: 120,
+    touchStartThreshold: 10,
     onEnd: function (evt) {
       if (evt.oldIndex === evt.newIndex) return;
 
