@@ -202,8 +202,18 @@ test('topics can be reordered via drag and drop', async ({ page }) => {
   await expect(tabs.nth(1)).toContainText('topic-b');
   await expect(tabs.nth(2)).toContainText('topic-c');
 
-  // Drag 'topic-a' (index 0) to 'topic-c' (index 2)
-  await tabs.nth(0).dragTo(tabs.nth(2));
+  // Drag 'topic-a' (index 0) onto 'topic-c' (index 2). SortableJS runs in
+  // forceFallback mode, which tracks the drag through incremental mousemove
+  // events — a single jump (Playwright's dragTo) never repositions the clone,
+  // so we move in steps the way a real pointer drag does.
+  const src = await tabs.nth(0).boundingBox();
+  const dst = await tabs.nth(2).boundingBox();
+  await page.mouse.move(src.x + src.width / 2, src.y + src.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(src.x + src.width / 2 + 10, src.y + src.height / 2, { steps: 5 });
+  await page.mouse.move(dst.x + dst.width / 2, dst.y + dst.height / 2, { steps: 10 });
+  await page.mouse.move(dst.x + dst.width - 2, dst.y + dst.height / 2, { steps: 5 });
+  await page.mouse.up();
 
   // The order should now be topic-b, topic-c, topic-a
   await expect(tabs.nth(0)).toContainText('topic-b');
@@ -222,20 +232,40 @@ test('topics can be reordered via drag and drop', async ({ page }) => {
 
 test('topic tabs support click-to-switch and click-to-close with multiple topics', async ({ page }) => {
   await page.goto('/');
+
+  // Emulate a real human click: press, jitter a few pixels, release. A plain
+  // Playwright .click() is a synthetic zero-movement event that bypasses
+  // SortableJS entirely — only a gesture with movement exposes the native-drag
+  // bug where the browser eats the `click` and the tab never toggles/closes.
+  async function realClick(locator, dx, dy) {
+    const box = await locator.boundingBox();
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + dx, y + dy);
+    await page.mouse.up();
+  }
+
   for (const t of ['click-a', 'click-b', 'click-c']) {
     await page.locator('#topic-input').fill(t);
     await page.locator('#subscribe-btn').click();
     await expect(page.locator('.topic-tab.active')).toContainText(t);
   }
 
-  await page.locator('.topic-tab', { hasText: 'click-a' }).click();
+  // Switch tabs with ~6px of jitter on the (large) tab body. That movement is
+  // within normal click jitter but is enough that Sortable's default native
+  // HTML5 drag starts a drag and swallows the click — so this step fails before
+  // the forceFallback fix and passes after it.
+  await realClick(page.locator('.topic-tab', { hasText: 'click-a' }), 6, 2);
   await expect(page.locator('.topic-tab.active')).toContainText('click-a');
 
-  await page.locator('.topic-tab', { hasText: 'click-b' })
-    .locator('.remove').click();
+  // Remove via the × — a small target, so keep the jitter tiny enough to stay
+  // on it (a larger move would retarget the click to the parent button).
+  await realClick(page.locator('.topic-tab', { hasText: 'click-b' }).locator('.remove'), 2, 1);
   await expect(page.locator('.topic-tab')).toHaveCount(2);
   await expect(page.locator('.topic-tab.active')).toContainText('click-a');
 
-  await page.locator('.topic-tab.active').locator('.remove').click();
+  await realClick(page.locator('.topic-tab.active').locator('.remove'), 2, 1);
   await expect(page.locator('.topic-tab')).toHaveCount(1);
 });
