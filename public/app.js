@@ -227,6 +227,13 @@ function initTopicSortable() {
     ghostClass: 'topic-tab-ghost',
     filter: '.remove',
     preventOnFilter: false,
+    // Sortable sets draggable="true" on the tab in mousedown's
+    // _prepareDragStart. Browsers then treat the gesture as a potential drag
+    // and the synthesized click on mouseup-without-move becomes unreliable,
+    // which is why select-topic stopped firing. A small delay defers the
+    // draggable=true assignment so quick clicks fire as clicks.
+    delay: 100,
+    delayOnTouchOnly: false,
     onEnd: function (evt) {
       if (evt.oldIndex === evt.newIndex) return;
 
