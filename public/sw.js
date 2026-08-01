@@ -1,10 +1,15 @@
 /* global PigeonCrypto, PigeonKeystore */
 importScripts('/keystore.js', '/crypto.js');
 
-const CACHE_NAME = 'pigeon-v5';
+const CACHE_NAME = 'pigeon-v6';
+// The editor bundle, its stylesheets and the icons were previously missing, so
+// an offline launch rendered without a compose box.
 const STATIC_ASSETS = [
-  '/', '/style.css', '/app.js', '/crypto.js', '/keystore.js', '/manifest.json', '/badge.png',
+  '/', '/style.css', '/app.js', '/crypto.js', '/keystore.js', '/manifest.json',
+  '/badge.png', '/favicon.png', '/icon-192.png', '/icon-512.png', '/logo.png',
   '/vendor/marked.min.js', '/vendor/purify.min.js', '/vendor/Sortable.min.js',
+  '/vendor/toastui-editor-all.min.js',
+  '/vendor/toastui-editor.min.css', '/vendor/toastui-editor-dark.min.css',
 ];
 
 self.addEventListener('install', (event) => {
@@ -27,6 +32,16 @@ self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
 
   const url = new URL(event.request.url);
+
+  // Navigations fall back to the cached shell when the network is unavailable,
+  // so a cold offline launch shows the app instead of the browser's error page.
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request).catch(() => caches.match('/'))
+    );
+    return;
+  }
+
   if (STATIC_ASSETS.includes(url.pathname)) {
     event.respondWith(
       caches.match(event.request).then((cached) => {

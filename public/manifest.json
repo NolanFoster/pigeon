@@ -1,11 +1,16 @@
 {
+  "id": "/",
   "name": "Pigeon",
   "short_name": "Pigeon",
   "description": "Push notifications, simple as HTTP",
+  "lang": "en",
+  "dir": "ltr",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#ffffff",
+  "display_override": ["standalone", "browser"],
+  "categories": ["productivity", "utilities"],
+  "background_color": "#faf8f5",
   "theme_color": "#654f44",
   "icons": [
     {
