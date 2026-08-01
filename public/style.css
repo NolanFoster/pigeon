@@ -245,6 +245,9 @@ code, pre {
 /* --- Dialog ------------------------------------------------------------- */
 
 .app-dialog {
+  /* The global `* { margin: 0 }` reset overrides the UA's `margin: auto`, which
+     is what centres a modal <dialog> in the top layer. */
+  margin: auto;
   width: min(28rem, calc(100vw - 2rem));
   padding: 1.5rem;
   border: 1px solid var(--color-border);
