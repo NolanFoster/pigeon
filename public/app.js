@@ -18,6 +18,17 @@ const state = {
   filterTag: null,
 };
 
+// fetch() resolves for 4xx/5xx, so a bare `await fetch(...)` inside a try block
+// silently treats a server error as success. Every mutating call goes through
+// this instead, so the callers' catch blocks actually run.
+async function apiFetch(url, opts) {
+  const res = await fetch(url, opts);
+  if (!res.ok) {
+    throw new Error(`${(opts && opts.method) || 'GET'} ${url} failed with HTTP ${res.status}`);
+  }
+  return res;
+}
+
 function saveTopicMeta() {
   localStorage.setItem('pigeon_topic_meta', JSON.stringify(state.topicMeta));
 }
@@ -117,6 +128,7 @@ async function tryDecryptMessage(topic, msg) {
 
 // DOM elements
 const topicInput = document.getElementById('topic-input');
+const topicInputError = document.getElementById('topic-input-error');
 const subscribeBtn = document.getElementById('subscribe-btn');
 const e2eeCheckbox = document.getElementById('e2ee-checkbox');
 const e2eePassphrase = document.getElementById('e2ee-passphrase');
@@ -125,8 +137,181 @@ const topicTabs = document.getElementById('topic-tabs');
 const messagesSection = document.getElementById('messages-section');
 const messagesList = document.getElementById('messages-list');
 const enablePushBtn = document.getElementById('enable-push-btn');
+const pushHint = document.getElementById('push-hint');
 const clearMessagesBtn = document.getElementById('clear-messages-btn');
 const clearCompletedBtn = document.getElementById('clear-completed-btn');
+const liveRegion = document.getElementById('live-region');
+const toastRegion = document.getElementById('toast-region');
+const appDialog = document.getElementById('app-dialog');
+const connectionStatusEl = document.getElementById('connection-status');
+
+// ---------------------------------------------------------------------------
+// Feedback primitives
+//
+// Every async path in this app used to end at console.error, so a failed
+// publish or a dropped socket was indistinguishable from "nothing happened".
+// announce() drives an aria-live region for screen readers; showToast() is the
+// visible counterpart; confirmDialog() replaces window.confirm.
+// ---------------------------------------------------------------------------
+
+// Appending a fresh node (rather than rewriting textContent) makes assistive
+// tech re-read the announcement even when the text repeats.
+function announce(text) {
+  if (!liveRegion || !text) return;
+  const line = document.createElement('p');
+  line.textContent = text;
+  liveRegion.appendChild(line);
+  setTimeout(() => line.remove(), 5000);
+}
+
+// Snackbar. Errors take role="alert" so they interrupt; everything else is a
+// polite status. Returns a dismiss function so callers can retract a toast
+// early (e.g. an undo window that closed).
+function showToast(message, opts = {}) {
+  if (!toastRegion) return () => {};
+  const {
+    tone = 'info',
+    actionLabel,
+    onAction,
+    duration = tone === 'error' ? 8000 : 5000,
+  } = opts;
+
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${tone}`;
+  toast.setAttribute('role', tone === 'error' ? 'alert' : 'status');
+
+  const text = document.createElement('span');
+  text.className = 'toast-text';
+  text.textContent = message;
+  toast.appendChild(text);
+
+  let timer = null;
+  const dismiss = () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    toast.remove();
+  };
+
+  if (actionLabel && typeof onAction === 'function') {
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'toast-action';
+    action.textContent = actionLabel;
+    action.addEventListener('click', () => { dismiss(); onAction(); });
+    toast.appendChild(action);
+  }
+
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'toast-close';
+  close.setAttribute('aria-label', 'Dismiss notification');
+  close.textContent = '×';
+  close.addEventListener('click', dismiss);
+  toast.appendChild(close);
+
+  toastRegion.appendChild(toast);
+  if (duration > 0) timer = setTimeout(dismiss, duration);
+  return dismiss;
+}
+
+function toastError(message, opts = {}) {
+  return showToast(message, { ...opts, tone: 'error' });
+}
+
+// Modal confirmation. The native <dialog> gives focus trapping, Esc-to-close
+// and top-layer rendering for free; we only add focus restoration.
+function confirmDialog({ title, body, confirmLabel = 'Confirm', cancelLabel = 'Cancel', destructive = false }) {
+  if (!appDialog || typeof appDialog.showModal !== 'function') {
+    return Promise.resolve(window.confirm(body ? `${title}\n\n${body}` : title));
+  }
+
+  const titleEl = document.getElementById('app-dialog-title');
+  const bodyEl = document.getElementById('app-dialog-body');
+  const confirmBtn = document.getElementById('app-dialog-confirm');
+  const cancelBtn = document.getElementById('app-dialog-cancel');
+
+  titleEl.textContent = title;
+  bodyEl.textContent = body || '';
+  bodyEl.hidden = !body;
+  confirmBtn.textContent = confirmLabel;
+  cancelBtn.textContent = cancelLabel;
+  confirmBtn.classList.toggle('btn-danger', destructive);
+  confirmBtn.classList.toggle('btn-primary', !destructive);
+
+  const opener = document.activeElement;
+
+  return new Promise((resolve) => {
+    const finish = (result) => {
+      confirmBtn.removeEventListener('click', onConfirm);
+      cancelBtn.removeEventListener('click', onCancel);
+      appDialog.removeEventListener('close', onClose);
+      if (appDialog.open) appDialog.close();
+      if (opener && typeof opener.focus === 'function') opener.focus();
+      resolve(result);
+    };
+    const onConfirm = () => finish(true);
+    const onCancel = () => finish(false);
+    const onClose = () => finish(false);
+
+    confirmBtn.addEventListener('click', onConfirm);
+    cancelBtn.addEventListener('click', onCancel);
+    appDialog.addEventListener('close', onClose);
+    appDialog.showModal();
+    // Focus the safe choice, not the destructive one.
+    cancelBtn.focus();
+  });
+}
+
+// Inline validation for the subscribe field, per HIG: report the error next to
+// the control that caused it rather than in a modal.
+function setTopicError(message) {
+  if (!topicInputError || !topicInput) return;
+  topicInputError.textContent = message || '';
+  topicInputError.hidden = !message;
+  topicInput.setAttribute('aria-invalid', message ? 'true' : 'false');
+  // Point the field at the error as well as the hint, so the message is read
+  // out when focus lands back on the input.
+  topicInput.setAttribute('aria-describedby',
+    message ? 'topic-input-error topic-input-hint' : 'topic-input-hint');
+}
+
+// ---------------------------------------------------------------------------
+// Connection status
+// ---------------------------------------------------------------------------
+
+function connectionSummary() {
+  if (state.topics.length === 0) return null;
+  if (typeof navigator.onLine === 'boolean' && !navigator.onLine) {
+    return { state: 'offline', text: 'Offline' };
+  }
+  const open = state.topics.filter(t => {
+    const conn = state.eventSources[t];
+    return conn && conn.ws.readyState === WebSocket.OPEN;
+  }).length;
+  if (open === state.topics.length) return { state: 'live', text: 'Live' };
+  if (open === 0) return { state: 'reconnecting', text: 'Reconnecting…' };
+  return { state: 'partial', text: `Reconnecting ${state.topics.length - open} of ${state.topics.length}` };
+}
+
+let lastConnectionState = null;
+function renderConnectionStatus() {
+  if (!connectionStatusEl) return;
+  const summary = connectionSummary();
+  if (!summary) {
+    connectionStatusEl.hidden = true;
+    lastConnectionState = null;
+    return;
+  }
+  connectionStatusEl.hidden = false;
+  connectionStatusEl.textContent = summary.text;
+  connectionStatusEl.dataset.state = summary.state;
+  if (summary.state !== lastConnectionState) {
+    if (lastConnectionState !== null) announce(`Connection status: ${summary.text}`);
+    lastConnectionState = summary.state;
+  }
+}
+
+window.addEventListener('online', renderConnectionStatus);
+window.addEventListener('offline', renderConnectionStatus);
 
 // Delegated click handler for any [data-action] element. Replaces the inline
 // `onclick="..."` attributes the rendered HTML used to carry — those were a
@@ -145,7 +330,7 @@ document.addEventListener('click', (e) => {
     case 'remove-topic': {
       e.stopPropagation();
       const topic = target.getAttribute('data-topic');
-      if (topic) removeTopic(topic);
+      if (topic) requestRemoveTopic(topic);
       break;
     }
     case 'filter-tag': {
@@ -261,14 +446,14 @@ async function init() {
     if (existing) {
       state.pushEnabled = true;
       state.pushSubscription = existing;
-      enablePushBtn.textContent = 'Push Enabled';
-      enablePushBtn.classList.add('enabled');
       // Re-register push for all topics (idempotent via INSERT OR REPLACE on server)
       Promise.all(
         state.topics.map(topic => registerPushForTopic(topic, existing))
       ).catch(err => console.error('Push re-registration failed:', err));
     }
   }
+
+  renderPushState();
 
   // Derive encryption keys for any e2ee topics whose passphrase is in IDB
   await Promise.all(state.topics.filter(isE2eeTopic).map(loadTopicKey));
@@ -296,21 +481,51 @@ async function maybeJoinFromFragment() {
   // Clear fragment so reloads don't re-prompt
   history.replaceState(null, '', location.pathname + location.search);
   if (state.topics.includes(topic) && isE2eeTopic(topic)) return;
-  const ok = window.confirm(`Join end-to-end encrypted topic "${topic}"?`);
+  const ok = await confirmDialog({
+    title: `Join “${topic}”?`,
+    body: 'This link carries the topic\'s shared passphrase. Anyone who has it can read and publish to this topic.',
+    confirmLabel: 'Join topic',
+  });
   if (!ok) return;
   await subscribeToTopic(topic, { e2ee: true, passphrase: k, salt: s, iter: i });
 }
 
 // Subscribe to a topic (UI handler)
 subscribeBtn.addEventListener('click', async () => {
-  const topic = topicInput.value.trim().replace(/[^a-zA-Z0-9_-]/g, '');
-  if (!topic || state.topics.includes(topic)) return;
+  const raw = topicInput.value.trim();
+  const topic = raw.replace(/[^a-zA-Z0-9_-]/g, '');
+
+  // The input used to be silently rewritten — typing "my topic!" subscribed you
+  // to "mytopic" with no indication. Report it instead (HIG: inline validation).
+  if (!raw) {
+    setTopicError('Enter a topic name.');
+    topicInput.focus();
+    return;
+  }
+  if (!topic) {
+    setTopicError('Topic names use letters, numbers, hyphens and underscores.');
+    topicInput.focus();
+    return;
+  }
+  if (topic !== raw) {
+    setTopicError(`Topic names can't contain those characters. Try “${topic}”.`);
+    topicInput.value = topic;
+    topicInput.focus();
+    return;
+  }
+  if (state.topics.includes(topic)) {
+    setTopicError(`You're already subscribed to “${topic}”.`);
+    selectTopic(topic);
+    return;
+  }
+  setTopicError('');
 
   const wantE2ee = !!(e2eeCheckbox && e2eeCheckbox.checked);
   if (wantE2ee) {
     const passphrase = (e2eePassphrase && e2eePassphrase.value) || '';
     if (!passphrase) {
-      window.alert('Enter a passphrase to enable end-to-end encryption.');
+      setTopicError('Enter a passphrase to enable end-to-end encryption.');
+      if (e2eePassphrase) e2eePassphrase.focus();
       return;
     }
     await subscribeToTopic(topic, {
@@ -365,9 +580,10 @@ async function subscribeToTopic(topic, opts) {
     saveTopicMeta();
     PigeonKeystore.deleteTopicKey(topic).catch(() => {});
     console.error('subscribeToTopic failed:', err);
-    window.alert(`Subscribe failed: ${err && err.message ? err.message : err}`);
+    toastError(`Couldn't subscribe to ${topic}: ${err && err.message ? err.message : err}`);
     throw err;
   }
+  announce(`Subscribed to ${topic}`);
 }
 
 topicInput.addEventListener('keydown', (e) => {
@@ -389,16 +605,41 @@ async function shareActiveTopic() {
   if (!topic || !isE2eeTopic(topic)) return;
   const meta = state.topicMeta[topic];
   const rec = await PigeonKeystore.getTopicKey(topic);
-  if (!rec || !rec.passphrase) return;
+  if (!rec || !rec.passphrase) {
+    toastError('No passphrase stored for this topic, so there is nothing to share.');
+    return;
+  }
+
+  // Warn *before* the link exists anywhere, not after it's on the clipboard.
+  const ok = await confirmDialog({
+    title: `Share “${topic}”?`,
+    body: 'The link contains this topic\'s passphrase. Anyone who opens it can read and publish every message in the topic — send it only over a channel you trust.',
+    confirmLabel: 'Create share link',
+  });
+  if (!ok) return;
+
   const k = encodeURIComponent(rec.passphrase);
   const s = encodeURIComponent(meta.salt);
   const i = meta.iter;
   const url = `${location.origin}/#topic=${encodeURIComponent(topic)}&k=${k}&s=${s}&i=${i}`;
+
+  // Prefer the platform share sheet on touch devices (HIG: Share sheets).
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: `Pigeon topic: ${topic}`, url });
+      return;
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      // Any other failure falls through to the clipboard path.
+    }
+  }
+
   try {
     await navigator.clipboard.writeText(url);
-    window.alert('Share link copied to clipboard.\n\nSend it via a trusted channel — anyone who opens it can read this topic.');
-  } catch {
-    window.prompt('Copy this share link:', url);
+    showToast('Share link copied to clipboard.', { tone: 'success' });
+  } catch (err) {
+    console.error('Clipboard write failed:', err);
+    toastError('Couldn\'t copy the link. Check clipboard permissions and try again.');
   }
 }
 
@@ -415,12 +656,16 @@ async function connectTopic(topic) {
   let historyLoaded = false;
 
   ws.onopen = async () => {
+    renderConnectionStatus();
     try {
       const res = await fetch(`/${topic}/json?since=all`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const msgs = await res.json();
       const reversed = msgs.reverse();
       await Promise.all(reversed.map(m => tryDecryptMessage(topic, m)));
       state.messages[topic] = reversed;
+      // History isn't "new" — don't animate it in.
+      markMessagesSeen(topic);
       // Merge any messages that arrived via WS while fetching history
       let newEarly = 0;
       for (const msg of earlyMessages) {
@@ -440,7 +685,17 @@ async function connectTopic(topic) {
         state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + newEarly;
         renderTopicTabs();
       }
-    } catch {}
+    } catch (err) {
+      historyLoaded = true;
+      console.error(`Loading history for ${topic} failed:`, err);
+      toastError(`Couldn't load messages for ${topic}.`, {
+        actionLabel: 'Retry',
+        onAction: () => {
+          disconnectTopic(topic);
+          connectTopic(topic);
+        },
+      });
+    }
   };
 
   ws.onmessage = async (event) => {
@@ -470,18 +725,22 @@ async function connectTopic(topic) {
       }
       if (state.messages[topic].some(m => m.id === msg.id)) return;
       state.messages[topic].unshift(msg);
+      announceIncoming(topic, msg);
       if (state.activeTopic === topic) {
         renderMessages();
       } else {
         state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + 1;
         renderTopicTabs();
       }
-    } catch {}
+    } catch (err) {
+      console.warn('Dropping malformed message:', err);
+    }
   };
 
   const reconnect = () => {
     clearInterval(heartbeatId);
     delete state.eventSources[topic];
+    renderConnectionStatus();
     setTimeout(() => {
       if (state.topics.includes(topic)) connectTopic(topic);
     }, 3000);
@@ -505,6 +764,20 @@ async function connectTopic(topic) {
   }, 30000);
 
   state.eventSources[topic] = { ws, heartbeatId };
+  renderConnectionStatus();
+}
+
+// The whole point of the app is that a message arrived. Say so out loud —
+// previously a screen reader was told nothing at all (WCAG 4.1.3).
+function announceIncoming(topic, msg) {
+  if (msg._locked) {
+    announce(`New encrypted message in ${topic}`);
+    return;
+  }
+  const title = msg.title || '';
+  const body = typeof msg.message === 'string' ? msg.message.slice(0, 120) : '';
+  const priority = msg.priority >= 4 ? `${PRIORITY_NAMES[msg.priority]} priority. ` : '';
+  announce(`${priority}New message in ${topic}. ${title ? title + '. ' : ''}${body}`);
 }
 
 function disconnectTopic(topic) {
@@ -522,14 +795,65 @@ function selectTopic(topic) {
   if (state.editing && state.editing.topic !== topic) {
     cancelEdit();
   }
+  const changed = state.activeTopic !== topic;
   state.activeTopic = topic;
   state.unreadCounts[topic] = 0;
   topicsSection.hidden = false;
   messagesSection.hidden = false;
   const shareBtn = document.getElementById('share-topic-btn');
   if (shareBtn) shareBtn.hidden = !isE2eeTopic(topic);
+  // Switching topics shouldn't replay the entrance animation for the whole
+  // incoming list — only messages that arrive afterwards are "new".
+  if (changed) {
+    messageEls.clear();
+    markMessagesSeen(topic);
+  }
+  // Point the tabpanel at the tab that controls it.
+  messagesList.setAttribute('aria-labelledby', topicDomId(topic));
   renderTopicTabs();
   renderMessages();
+}
+
+// Unsubscribing from an encrypted topic destroys the only copy of its
+// passphrase, permanently orphaning every message in it — that warrants a
+// confirmation. A plain topic can be re-added by typing its name, so it gets an
+// optimistic removal with an undo snackbar instead (Material 3 snackbar
+// pattern; HIG "confirm destructive actions" applies only to the first case).
+async function requestRemoveTopic(topic) {
+  if (isE2eeTopic(topic)) {
+    const ok = await confirmDialog({
+      title: `Unsubscribe from “${topic}”?`,
+      body: 'This deletes the passphrase stored in this browser. Every encrypted message in this topic becomes permanently unreadable here, and there is no way to recover it.',
+      confirmLabel: 'Unsubscribe and delete key',
+      destructive: true,
+    });
+    if (!ok) return;
+    removeTopic(topic);
+    showToast(`Unsubscribed from ${topic}.`);
+    return;
+  }
+
+  const meta = state.topicMeta[topic];
+  const index = state.topics.indexOf(topic);
+  removeTopic(topic);
+  showToast(`Unsubscribed from ${topic}.`, {
+    actionLabel: 'Undo',
+    onAction: () => {
+      if (state.topics.includes(topic)) return;
+      state.topics.splice(index < 0 ? state.topics.length : index, 0, topic);
+      if (meta) {
+        state.topicMeta[topic] = meta;
+        saveTopicMeta();
+      }
+      localStorage.setItem('pigeon_topics', JSON.stringify(state.topics));
+      connectTopic(topic);
+      if (state.pushEnabled && state.pushSubscription) {
+        registerPushForTopic(topic, state.pushSubscription);
+      }
+      selectTopic(topic);
+      renderTopicTabs();
+    },
+  });
 }
 
 function removeTopic(topic) {
@@ -561,34 +885,135 @@ function removeTopic(topic) {
   }
 }
 
+// Stable, CSS/HTML-id-safe handle for a topic name. Topic names arriving via a
+// share fragment aren't guaranteed to match the subscribe box's charset.
+function topicDomId(topic) {
+  return 'topic-tab-' + String(topic).replace(/[^a-zA-Z0-9_-]/g, c => '_' + c.charCodeAt(0).toString(16));
+}
+
+// A tab is a wrapper holding two sibling buttons. The remove control used to
+// live *inside* the tab button — interactive content nested in a button, which
+// is invalid, keyboard-unreachable, and had no accessible name.
+function buildTopicTab(topic) {
+  const active = topic === state.activeTopic;
+  const encrypted = isE2eeTopic(topic);
+  const unread = (state.unreadCounts && state.unreadCounts[topic]) || 0;
+
+  const wrap = document.createElement('div');
+  wrap.className = `topic-tab${active ? ' active' : ''}`;
+  wrap.dataset.topic = topic;
+
+  const select = document.createElement('button');
+  select.type = 'button';
+  select.className = 'topic-tab-select';
+  select.id = topicDomId(topic);
+  select.setAttribute('role', 'tab');
+  select.setAttribute('aria-selected', active ? 'true' : 'false');
+  select.setAttribute('aria-controls', 'messages-list');
+  // Roving tabindex: only the selected tab is in the tab order; arrow keys
+  // move between tabs (ARIA Authoring Practices, Tabs pattern).
+  select.tabIndex = active ? 0 : -1;
+  select.dataset.action = 'select-topic';
+  select.dataset.topic = topic;
+  select.setAttribute('aria-label',
+    `${topic}${encrypted ? ', end-to-end encrypted' : ''}${unread ? `, ${unread} unread` : ''}`);
+
+  if (encrypted) {
+    const lock = document.createElement('span');
+    lock.className = 'topic-lock';
+    lock.setAttribute('aria-hidden', 'true');
+    lock.textContent = '🔒';
+    select.appendChild(lock);
+  }
+
+  const label = document.createElement('span');
+  label.className = 'topic-tab-label';
+  label.textContent = topic;
+  select.appendChild(label);
+
+  if (unread) {
+    const badge = document.createElement('span');
+    badge.className = 'unread-badge';
+    badge.setAttribute('aria-hidden', 'true');
+    badge.textContent = String(unread);
+    select.appendChild(badge);
+  }
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'remove';
+  remove.dataset.action = 'remove-topic';
+  remove.dataset.topic = topic;
+  remove.setAttribute('aria-label', `Unsubscribe from ${topic}`);
+  remove.textContent = '×';
+
+  wrap.append(select, remove);
+  return wrap;
+}
+
 function renderTopicTabs() {
   if (state.topics.length === 0) {
     topicsSection.hidden = true;
+    topicTabs.replaceChildren();
     if (topicSortable) {
       topicSortable.destroy();
       topicSortable = null;
     }
+    renderConnectionStatus();
     return;
   }
   topicsSection.hidden = false;
 
-  topicTabs.innerHTML = state.topics
-    .map(t => {
-      const unread = state.unreadCounts && state.unreadCounts[t] ? `<span class="unread-badge">${state.unreadCounts[t]}</span>` : '';
-      const lockIcon = isE2eeTopic(t)
-        ? `<span class="topic-lock" title="End-to-end encrypted" aria-label="encrypted">🔒</span>`
-        : '';
-      const topicAttr = escapeAttr(t);
-      return `
-      <button class="topic-tab ${t === state.activeTopic ? 'active' : ''}"
-              data-action="select-topic" data-topic="${topicAttr}">
-        ${lockIcon}${escapeHtml(t)}${unread}<span class="remove" data-action="remove-topic" data-topic="${topicAttr}">×</span>
-      </button>
-    `})
-    .join('');
+  const frag = document.createDocumentFragment();
+  for (const t of state.topics) frag.appendChild(buildTopicTab(t));
+  topicTabs.replaceChildren(frag);
 
   initTopicSortable();
+  renderConnectionStatus();
 }
+
+// Keyboard support for the tablist: arrows move focus, Alt+arrows reorder
+// (the keyboard alternative to the SortableJS drag, per WCAG 2.2 SC 2.5.7),
+// Delete unsubscribes.
+topicTabs.addEventListener('keydown', (e) => {
+  const tabs = Array.from(topicTabs.querySelectorAll('.topic-tab-select'));
+  const idx = tabs.indexOf(document.activeElement);
+  if (idx === -1) return;
+
+  if (e.altKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+    e.preventDefault();
+    const to = idx + (e.key === 'ArrowRight' ? 1 : -1);
+    if (to < 0 || to >= state.topics.length) return;
+    const [moved] = state.topics.splice(idx, 1);
+    state.topics.splice(to, 0, moved);
+    localStorage.setItem('pigeon_topics', JSON.stringify(state.topics));
+    renderTopicTabs();
+    const target = topicTabs.querySelectorAll('.topic-tab-select')[to];
+    if (target) target.focus();
+    announce(`${moved} moved to position ${to + 1} of ${state.topics.length}`);
+    return;
+  }
+
+  let next = null;
+  if (e.key === 'ArrowRight') next = tabs[(idx + 1) % tabs.length];
+  else if (e.key === 'ArrowLeft') next = tabs[(idx - 1 + tabs.length) % tabs.length];
+  else if (e.key === 'Home') next = tabs[0];
+  else if (e.key === 'End') next = tabs[tabs.length - 1];
+  else if (e.key === 'Delete') {
+    e.preventDefault();
+    removeTopic(tabs[idx].dataset.topic);
+    return;
+  }
+
+  if (next) {
+    e.preventDefault();
+    next.focus();
+    selectTopic(next.dataset.topic);
+    // selectTopic re-renders, so re-acquire the focused element.
+    const refocus = document.getElementById(next.id);
+    if (refocus) refocus.focus();
+  }
+});
 
 function msgTags(msg) {
   return msg.tags ? msg.tags.split(',').map(t => t.trim()) : [];
@@ -614,33 +1039,361 @@ function getDoneTodoIds(allMsgs) {
   return { doneIds, markerIds };
 }
 
-function renderMessages() {
-  // Pull the compose form out of messagesList BEFORE we wipe innerHTML, so
-  // it survives the wipe even if it was previously transplanted into an
-  // inline edit slot. We'll place it correctly again at the end.
-  if (composeEl && messagesList.contains(composeEl)) {
-    composeHome.appendChild(composeEl);
+// --- Static, developer-authored icon markup -------------------------------
+const PRIORITY_ICONS = {
+  5: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>',
+  4: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>',
+  3: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>',
+};
+const PRIORITY_NAMES = { 5: 'critical', 4: 'high', 3: 'normal', 2: 'low', 1: 'info' };
+const COPY_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+const EDIT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path></svg>';
+const CHECK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+
+// ---------------------------------------------------------------------------
+// Incremental rendering
+//
+// renderMessages() used to rebuild messagesList.innerHTML on every call — which
+// happens on every arriving WebSocket message, every filter toggle and every
+// todo tick. That destroyed keyboard focus, reset the screen reader's reading
+// position, and re-ran the entrance animation on every card in the list.
+//
+// Cards are now cached by message id and reused whenever the fields that affect
+// their rendering are unchanged, so an arriving message touches only the DOM it
+// actually adds.
+// ---------------------------------------------------------------------------
+
+const messageEls = new Map();    // message id -> card element
+const composeSlots = new Map();  // message id -> inline edit slot element
+// Ids already rendered at least once; used so only genuinely new messages get
+// the slide-in animation.
+const animatedIds = new Set();
+let filterRowEl = null;
+let filterRowSig = null;
+let emptyStateEl = null;
+let emptyStateSig = null;
+
+// Marks every message currently known for a topic as already-seen, so loading
+// history or switching topics doesn't animate the whole list.
+function markMessagesSeen(topic) {
+  for (const m of state.messages[topic] || []) animatedIds.add(m.id);
+}
+
+// Places `desired` as the exact child list of `parent`, moving existing nodes
+// rather than recreating them.
+function reconcileChildren(parent, desired) {
+  const keep = new Set(desired);
+  for (const child of Array.from(parent.childNodes)) {
+    if (!keep.has(child)) parent.removeChild(child);
+  }
+  let ref = parent.firstChild;
+  for (const node of desired) {
+    if (node === ref) {
+      ref = ref.nextSibling;
+      continue;
+    }
+    parent.insertBefore(node, ref);
+  }
+}
+
+function iconButton(className, iconMarkup, label, action, msgId) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = className;
+  btn.dataset.action = action;
+  btn.dataset.msgId = msgId;
+  btn.setAttribute('aria-label', label);
+  const icon = document.createElement('span');
+  icon.className = 'btn-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.innerHTML = iconMarkup;
+  btn.appendChild(icon);
+  return btn;
+}
+
+function buildPriorityBadge(priority) {
+  const badge = document.createElement('span');
+  badge.className = 'msg-priority-badge';
+  if (PRIORITY_ICONS[priority]) {
+    const icon = document.createElement('span');
+    icon.className = 'msg-priority-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.innerHTML = PRIORITY_ICONS[priority];
+    badge.appendChild(icon);
+  }
+  badge.appendChild(document.createTextNode(`P${priority}`));
+  // Colour and a glyph alone can't carry priority (WCAG 1.4.1) — spell it out
+  // for assistive tech.
+  const sr = document.createElement('span');
+  sr.className = 'visually-hidden';
+  sr.textContent = ` ${PRIORITY_NAMES[priority] || ''} priority`;
+  badge.appendChild(sr);
+  return badge;
+}
+
+function buildTagChip(raw) {
+  const chip = document.createElement('button');
+  chip.type = 'button';
+  chip.className = 'tag-chip';
+  chip.dataset.action = 'filter-tag';
+  chip.dataset.tag = raw;
+  chip.textContent = emojifyTag(raw);
+  // The visible label may be emoji-only; keep the real tag name reachable.
+  chip.setAttribute('aria-label', `Filter by tag: ${raw}`);
+  return chip;
+}
+
+function buildTimeEl(msg) {
+  const date = new Date(msg.created_at * 1000);
+  const time = document.createElement('time');
+  time.className = 'msg-time';
+  time.dateTime = date.toISOString();
+  time.title = date.toLocaleString();
+  time.setAttribute('data-time', String(msg.created_at));
+  time.textContent = timeAgo(date);
+  return time;
+}
+
+function buildCard(msg, ctx) {
+  const card = document.createElement('article');
+  card.className = `message-card priority-${msg.priority}`;
+  card.dataset.msgId = msg.id;
+
+  const header = document.createElement('div');
+  header.className = 'msg-header';
+  const left = document.createElement('div');
+  left.className = 'msg-header-left';
+  const right = document.createElement('div');
+  right.className = 'msg-header-right';
+  right.appendChild(buildTimeEl(msg));
+
+  if (msg._locked) {
+    card.classList.add('locked-message');
+    const title = document.createElement('h3');
+    title.className = 'msg-title';
+    title.textContent = '🔒 Encrypted message';
+    left.appendChild(title);
+    header.append(left, right);
+    const body = document.createElement('div');
+    body.className = 'msg-body locked-body';
+    body.textContent = 'Enter the topic passphrase to decrypt this message.';
+    card.append(header, body);
+    return card;
   }
 
+  const titleText = msg.title || msg.topic || '';
+  if (ctx.isTodo) card.classList.add('is-todo');
+  if (ctx.isDone) card.classList.add('is-done');
+
+  if (ctx.isTodo) {
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'todo-checkbox';
+    cb.checked = ctx.isDone;
+    cb.disabled = ctx.isDone;
+    cb.dataset.action = 'toggle-todo';
+    cb.dataset.msgId = msg.id;
+    cb.dataset.topic = msg.topic;
+    cb.dataset.done = ctx.isDone ? '1' : '0';
+    cb.setAttribute('aria-label',
+      ctx.isDone ? `Completed: ${titleText}` : `Mark "${titleText}" complete`);
+    left.appendChild(cb);
+  }
+
+  const title = document.createElement('h3');
+  title.className = 'msg-title';
+  title.appendChild(document.createTextNode(titleText));
+  if (msg.priority >= 3) title.appendChild(buildPriorityBadge(msg.priority));
+  left.appendChild(title);
+
+  right.appendChild(iconButton('edit-btn', EDIT_ICON, `Edit message: ${titleText}`, 'edit-msg', msg.id));
+  right.appendChild(iconButton('copy-btn', COPY_ICON, `Copy message: ${titleText}`, 'copy-msg', msg.id));
+
+  header.append(left, right);
+  card.appendChild(header);
+
+  const body = document.createElement('div');
+  body.className = 'msg-body' + (ctx.isDone ? ' todo-done' : '');
+  if (msg.markdown) {
+    body.innerHTML = renderMarkdown(msg.message, msg.id);
+    // Give each rendered `- [ ]` checkbox the text of its own list item.
+    body.querySelectorAll('.md-task-checkbox').forEach((cb, i) => {
+      const li = cb.closest('li');
+      const text = li ? li.textContent.trim() : '';
+      cb.setAttribute('aria-label', text || `Task ${i + 1}`);
+    });
+  } else {
+    body.textContent = msg.message == null ? '' : String(msg.message);
+  }
+  card.appendChild(body);
+
+  const safeImage = safeHttpUrl(msg.image);
+  if (safeImage) {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-image';
+    const img = document.createElement('img');
+    img.src = safeImage;
+    img.alt = '';
+    img.loading = 'lazy';
+    wrap.appendChild(img);
+    card.appendChild(wrap);
+  }
+
+  const tagNames = msgTags(msg).filter(Boolean);
+  if (tagNames.length) {
+    const tags = document.createElement('div');
+    tags.className = 'msg-tags';
+    for (const raw of tagNames) tags.appendChild(buildTagChip(raw));
+    card.appendChild(tags);
+  }
+
+  return card;
+}
+
+// Everything that changes a card's rendered output. Timestamps are excluded
+// deliberately — they're refreshed in place by the ticker below, so a passing
+// minute must not rebuild (and re-animate) every card.
+function cardSignature(msg, ctx) {
+  return JSON.stringify([
+    msg.title, msg.message, msg.tags, msg.priority, msg.image,
+    !!msg.markdown, !!msg._locked, ctx.isTodo, ctx.isDone, ctx.editingThis,
+  ]);
+}
+
+function getCard(msg, ctx) {
+  const sig = cardSignature(msg, ctx);
+  const cached = messageEls.get(msg.id);
+  if (cached && cached.dataset.sig === sig) {
+    cached.hidden = ctx.editingThis;
+    return cached;
+  }
+  const card = buildCard(msg, ctx);
+  card.dataset.sig = sig;
+  card.hidden = ctx.editingThis;
+  if (!animatedIds.has(msg.id)) {
+    card.classList.add('is-new');
+    animatedIds.add(msg.id);
+  }
+  messageEls.set(msg.id, card);
+  return card;
+}
+
+function getComposeSlot(id) {
+  let slot = composeSlots.get(id);
+  if (!slot) {
+    slot = document.createElement('div');
+    slot.className = 'compose-slot';
+    slot.dataset.msgId = id;
+    composeSlots.set(id, slot);
+  }
+  return slot;
+}
+
+function buildFilterRow(uniqueTags) {
+  if (state.filterTag) {
+    const banner = document.createElement('div');
+    banner.className = 'filter-banner';
+    const label = document.createElement('span');
+    label.appendChild(document.createTextNode('Filtering by tag: '));
+    const strong = document.createElement('strong');
+    strong.textContent = emojifyTag(state.filterTag);
+    label.appendChild(strong);
+    banner.appendChild(label);
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'btn btn-tertiary clear-filter-btn';
+    clear.dataset.action = 'clear-filter';
+    clear.textContent = 'Clear Filter';
+    banner.appendChild(clear);
+    return banner;
+  }
+  if (uniqueTags.length === 0) return null;
+
+  const row = document.createElement('div');
+  row.className = 'tags-row';
+  const label = document.createElement('span');
+  label.className = 'tags-label';
+  label.id = 'tags-row-label';
+  label.textContent = 'Filter by tag:';
+  const chips = document.createElement('div');
+  chips.className = 'tags-chips-container';
+  chips.setAttribute('role', 'group');
+  chips.setAttribute('aria-labelledby', 'tags-row-label');
+  for (const t of uniqueTags) chips.appendChild(buildTagChip(t));
+  row.append(label, chips);
+  return row;
+}
+
+function getFilterRow(uniqueTags) {
+  const sig = JSON.stringify([state.filterTag, uniqueTags]);
+  if (filterRowSig !== sig) {
+    filterRowSig = sig;
+    filterRowEl = buildFilterRow(uniqueTags);
+  }
+  return filterRowEl;
+}
+
+function buildEmptyState(kind, topic) {
+  const wrap = document.createElement('div');
+  wrap.className = 'empty-state';
+
+  const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  icon.setAttribute('class', 'empty-state-icon');
+  icon.setAttribute('viewBox', '0 0 80 80');
+  icon.setAttribute('fill', 'none');
+  icon.setAttribute('aria-hidden', 'true');
+  icon.innerHTML = kind === 'no-topic'
+    ? '<circle cx="40" cy="40" r="32" stroke="currentColor" stroke-width="2" opacity="0.2"/><path d="M40 25v15l10 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.4"/>'
+    : '<rect x="12" y="24" width="56" height="36" rx="4" stroke="currentColor" stroke-width="2"/><path d="M12 28l28 18 28-18" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="62" cy="22" r="8" fill="#7a8b5c" opacity="0.2" stroke="#7a8b5c" stroke-width="2"/><path d="M59 22l2 2 4-4" stroke="#7a8b5c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>';
+  wrap.appendChild(icon);
+
+  const title = document.createElement('p');
+  title.className = 'empty-state-title';
+  const hint = document.createElement('p');
+  hint.className = 'empty-state-hint';
+
+  if (kind === 'no-topic') {
+    title.textContent = 'No topic selected';
+    hint.textContent = 'Select a topic from the list or subscribe to a new one.';
+    wrap.append(title, hint);
+  } else if (kind === 'filtered') {
+    title.textContent = 'No messages with this tag';
+    hint.textContent = 'Try clearing the filter or sending a message with this tag.';
+    wrap.append(title, hint);
+  } else {
+    title.textContent = 'Listening for messages';
+    hint.textContent = 'Use the compose area below or send one via HTTP:';
+    const cmd = document.createElement('code');
+    cmd.className = 'empty-state-cmd';
+    cmd.textContent = `curl -d "Hello!" ${location.origin}/${topic}`;
+    wrap.append(title, hint, cmd);
+  }
+  return wrap;
+}
+
+function getEmptyState(kind, topic) {
+  const sig = `${kind}|${topic || ''}`;
+  if (emptyStateSig !== sig) {
+    emptyStateSig = sig;
+    emptyStateEl = buildEmptyState(kind, topic);
+  }
+  return emptyStateEl;
+}
+
+function renderMessages() {
   const topic = state.activeTopic;
+  const desired = [];
+
   if (!topic) {
-    messagesList.innerHTML = `
-      <div class="empty-state">
-        <svg class="empty-state-icon" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="40" cy="40" r="32" stroke="currentColor" stroke-width="2" opacity="0.2"/>
-          <path d="M40 25v15l10 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.4"/>
-        </svg>
-        <p class="empty-state-title">No topic selected</p>
-        <p class="empty-state-hint">Select a topic from the list or subscribe to a new one.</p>
-      </div>
-    `;
+    messageEls.clear();
+    desired.push(getEmptyState('no-topic'));
+    reconcileChildren(messagesList, desired);
     if (clearCompletedBtn) clearCompletedBtn.hidden = true;
     placeCompose();
     return;
   }
 
   const allMsgs = state.messages[topic] || [];
-
   const { doneIds } = getDoneTodoIds(allMsgs);
   if (clearCompletedBtn) clearCompletedBtn.hidden = doneIds.size === 0;
 
@@ -649,136 +1402,55 @@ function renderMessages() {
     return !(tags.includes('todo') && tags.includes('done'));
   });
 
-  // Extract all unique tags for the current topic to show as quick-filters
-  const uniqueTags = Array.from(new Set(
-    msgs.flatMap(m => msgTags(m))
-  )).sort();
-
-  const filterBanner = state.filterTag
-    ? `<div class="filter-banner">
-        <span>Filtering by tag: <strong>${escapeHtml(emojifyTag(state.filterTag))}</strong></span>
-        <button class="btn btn-tertiary clear-filter-btn" data-action="clear-filter">Clear Filter</button>
-       </div>`    : (uniqueTags.length > 0 ? `
-      <div class="tags-row">
-        <span class="tags-label">Filter by tag:</span>
-        <div class="tags-chips-container">
-          ${uniqueTags.map(t => `<span class="tag-chip" data-action="filter-tag" data-tag="${escapeAttr(t)}">${escapeHtml(emojifyTag(t))}</span>`).join('')}
-        </div>
-      </div>
-    ` : '');
+  // Every tag present in the topic, offered as quick filters.
+  const uniqueTags = Array.from(new Set(msgs.flatMap(m => msgTags(m)))).sort();
 
   if (state.filterTag) {
-    msgs = msgs.filter(msg => {
-      if (!msg.tags) return false;
-      return msg.tags.split(',').map(t => t.trim()).includes(state.filterTag);
-    });
+    msgs = msgs.filter(m => msgTags(m).includes(state.filterTag));
+  }
+
+  const filterRow = getFilterRow(uniqueTags);
+  if (filterRow) desired.push(filterRow);
+
+  const visible = new Set();
+  for (const msg of msgs) {
+    const tagList = msgTags(msg);
+    const isTodo = tagList.includes('todo');
+    const ctx = {
+      isTodo,
+      isDone: isTodo && doneIds.has(msg.id),
+      editingThis: !!(state.editing && state.editing.id === msg.id),
+    };
+    visible.add(msg.id);
+    desired.push(getCard(msg, ctx));
+    if (ctx.editingThis) desired.push(getComposeSlot(msg.id));
+  }
+
+  // Drop cached cards for messages that are no longer shown.
+  for (const id of Array.from(messageEls.keys())) {
+    if (!visible.has(id)) messageEls.delete(id);
   }
 
   if (msgs.length === 0) {
-    messagesList.innerHTML = filterBanner + `
-      <div class="empty-state">
-        <svg class="empty-state-icon" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <rect x="12" y="24" width="56" height="36" rx="4" stroke="currentColor" stroke-width="2"/>
-          <path d="M12 28l28 18 28-18" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          <circle cx="62" cy="22" r="8" fill="#7a8b5c" opacity="0.2" stroke="#7a8b5c" stroke-width="2"/>
-          <path d="M59 22l2 2 4-4" stroke="#7a8b5c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <p class="empty-state-title">${state.filterTag ? 'No messages with this tag' : 'Listening for messages'}</p>
-        <p class="empty-state-hint">${state.filterTag ? 'Try clearing the filter or sending a message with this tag.' : 'Use the compose area below or send one via HTTP:'}</p>
-        ${state.filterTag ? '' : `<code class="empty-state-cmd">curl -d "Hello!" ${escapeHtml(location.origin)}/${escapeHtml(state.activeTopic)}</code>`}
-      </div>
-    `;
-    placeCompose();
-    return;
+    desired.push(getEmptyState(state.filterTag ? 'filtered' : 'listening', topic));
   }
 
-  messagesList.innerHTML = filterBanner + msgs
-    .map(msg => {
-      const time = timeAgo(new Date(msg.created_at * 1000));
-      if (msg._locked) {
-        return `
-        <div class="message-card priority-${msg.priority} locked-message">
-          <div class="msg-header">
-            <span class="msg-title">🔒 Encrypted message</span>
-            <div class="msg-header-right">
-              <span class="msg-time" data-time="${escapeAttr(msg.created_at)}">${escapeHtml(time)}</span>
-            </div>
-          </div>
-          <div class="msg-body locked-body">Enter the topic passphrase to decrypt this message.</div>
-        </div>`;
-      }
-      const title = msg.title || msg.topic;
-      const tagList = msgTags(msg);
-      const isTodo = tagList.includes('todo');
-      const isDone = isTodo && doneIds.has(msg.id);
-      const tags = msg.tags
-        ? `<div class="msg-tags">` + msg.tags.split(',').map(t => {
-            const raw = t.trim();
-            return `<span class="tag-chip" data-action="filter-tag" data-tag="${escapeAttr(raw)}">${escapeHtml(emojifyTag(raw))}</span>`;
-          }).join('') + `</div>`
-        : '';
-
-      let icon = '';
-      if (msg.priority === 5) icon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: text-bottom;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`;
-      else if (msg.priority === 4) icon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: text-bottom;"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>`;
-      else if (msg.priority === 3) icon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px; vertical-align: text-bottom;"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>`;
-
-      const priorityLabel = msg.priority >= 3
-        ? `<span class="msg-priority-badge">${icon}P${msg.priority}</span>`
-        : '';
-      const safeImage = safeHttpUrl(msg.image);
-      const image = safeImage ? `<div class="msg-image"><img src="${escapeAttr(safeImage)}" alt="" loading="lazy"></div>` : '';
-
-      const copyIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
-      const editIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path></svg>`;
-
-      const todoCheckbox = isTodo
-        ? `<input type="checkbox" class="todo-checkbox" ${isDone ? 'checked' : ''} ${isDone ? 'disabled' : ''} data-action="toggle-todo" data-msg-id="${escapeAttr(msg.id)}" data-topic="${escapeAttr(msg.topic)}" data-done="${isDone ? '1' : '0'}" title="${isDone ? 'Completed' : 'Mark complete'}">`
-        : '';
-
-      const editingThis = state.editing && state.editing.id === msg.id;
-      const hiddenAttr = editingThis ? ' style="display:none"' : '';
-      const slot = editingThis
-        ? `<div class="compose-slot" data-msg-id="${escapeAttr(msg.id)}"></div>`
-        : '';
-
-      return `
-        <div class="message-card priority-${msg.priority}${isTodo ? ' is-todo' : ''}${isDone ? ' is-done' : ''}"${hiddenAttr}>
-          <div class="msg-header">
-            <span class="msg-title">${todoCheckbox}${escapeHtml(title)}${priorityLabel}</span>
-            <div class="msg-header-right">
-              <span class="msg-time" data-time="${escapeAttr(msg.created_at)}">${escapeHtml(time)}</span>
-              <button class="edit-btn" title="Edit message" data-action="edit-msg" data-msg-id="${escapeAttr(msg.id)}">
-                ${editIcon}
-              </button>
-              <button class="copy-btn" title="Copy message" data-action="copy-msg" data-msg-id="${escapeAttr(msg.id)}">
-                ${copyIcon}
-              </button>
-            </div>
-          </div>
-          <div class="msg-body${isDone ? ' todo-done' : ''}">${msg.markdown ? renderMarkdown(msg.message, msg.id) : escapeHtml(msg.message)}</div>
-          ${image}
-          ${tags}
-        </div>
-        ${slot}
-      `;
-    })
-    .join('');
-
+  reconcileChildren(messagesList, desired);
   placeCompose();
+  if (!state.editing) composeSlots.clear();
 }
 
-// Move the compose form to its correct location after a render. If we're
-// editing and a slot for that message exists in the freshly-rendered HTML,
-// transplant compose into it; otherwise restore it to its home parent. The
-// caller guarantees compose is not inside messagesList when this runs
-// (renderMessages pulls it out before the innerHTML wipe), so this only ever
-// does at most one DOM move per render.
+// Move the compose form to its correct location after a render. While editing,
+// the form lives inside the slot rendered under the message being edited;
+// otherwise it sits in its original parent. Because slots are cached and
+// reconciled rather than rebuilt, an ongoing edit survives a re-render with no
+// DOM move at all — which matters because re-parenting the Toast UI editor
+// resets its selection.
 function placeCompose() {
   if (!composeEl || !composeHome) return;
   if (state.editing) {
-    const slot = messagesList.querySelector(`.compose-slot[data-msg-id="${CSS.escape(state.editing.id)}"]`);
-    if (slot) {
+    const slot = composeSlots.get(state.editing.id);
+    if (slot && slot.isConnected) {
       if (composeEl.parentElement !== slot) slot.appendChild(composeEl);
       return;
     }
@@ -802,7 +1474,7 @@ async function toggleTodo(id, topic, done) {
     if (isE2eeTopic(topic)) {
       const key = state.topicKeys[topic];
       if (!key) {
-        window.alert('No key loaded for this topic — cannot mark complete.');
+        toastError('No passphrase loaded for this topic, so it can\'t be marked complete.');
         return;
       }
       const meta = state.topicMeta[topic];
@@ -812,7 +1484,7 @@ async function toggleTodo(id, topic, done) {
         meta.salt,
         meta.iter,
       );
-      await fetch(`/${topic}`, {
+      await apiFetch(`/${topic}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/vnd.pigeon.e2ee+json',
@@ -822,13 +1494,20 @@ async function toggleTodo(id, topic, done) {
       });
       return;
     }
-    await fetch(`/${topic}`, {
+    await apiFetch(`/${topic}`, {
       method: 'POST',
       headers: { 'X-Tags': 'todo,done' },
       body: id,
     });
   } catch (err) {
     console.error('toggleTodo failed:', err);
+    toastError("Couldn't mark that task complete.", {
+      actionLabel: 'Retry',
+      onAction: () => toggleTodo(id, topic, done),
+    });
+    // The optimistic tick is undone by the next render, which reads completion
+    // state back from the message stream.
+    renderMessages();
   }
 }
 
@@ -857,15 +1536,24 @@ async function toggleMarkdownTask(msgId, index) {
   }
   if (newBody === null) return;
 
+  // The encrypted path needs its key before anything is destroyed.
+  const encrypted = isE2eeTopic(topic);
+  const key = encrypted ? state.topicKeys[topic] : null;
+  if (encrypted && !key) {
+    toastError('No passphrase loaded for this topic, so the task can\'t be updated.');
+    return;
+  }
+
+  const previousBody = msg.message;
   msg._toggling = true;
   msg.message = newBody;
   renderMessages();
 
   try {
-    await fetch(`/${topic}/messages/${msg.id}`, { method: 'DELETE' });
-    if (isE2eeTopic(topic)) {
-      const key = state.topicKeys[topic];
-      if (!key) return;
+    // Publish the updated message *before* deleting the original. The old
+    // order (DELETE then POST) lost the message outright whenever the publish
+    // failed — the delete had already gone through.
+    if (encrypted) {
       const meta = state.topicMeta[topic];
       const fields = {
         title: msg.title || '',
@@ -874,7 +1562,7 @@ async function toggleMarkdownTask(msgId, index) {
         markdown: true,
       };
       const envelope = await PigeonCrypto.encryptFields(key, fields, meta.salt, meta.iter);
-      await fetch(`/${topic}`, {
+      await apiFetch(`/${topic}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/vnd.pigeon.e2ee+json',
@@ -887,10 +1575,18 @@ async function toggleMarkdownTask(msgId, index) {
       const headers = { 'X-Markdown': '1', 'X-Priority': String(msg.priority || 3) };
       if (msg.title) headers['X-Title'] = msg.title;
       if (msg.tags) headers['X-Tags'] = msg.tags;
-      await fetch(`/${topic}`, { method: 'POST', headers, body: newBody });
+      await apiFetch(`/${topic}`, { method: 'POST', headers, body: newBody });
     }
+    await apiFetch(`/${topic}/messages/${msg.id}`, { method: 'DELETE' });
   } catch (err) {
     console.error('toggleMarkdownTask failed:', err);
+    // Roll the optimistic edit back so the checkbox matches what's stored.
+    msg.message = previousBody;
+    renderMessages();
+    toastError("Couldn't update that task.", {
+      actionLabel: 'Retry',
+      onAction: () => toggleMarkdownTask(msgId, index),
+    });
   } finally {
     msg._toggling = false;
   }
@@ -913,9 +1609,27 @@ function editMessage(id) {
   // Re-render to inject the inline slot and transplant the compose form into it.
   renderMessages();
   if (composeEl) composeEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  // Follow the user's focus into the form they just opened — pressing Edit used
+  // to destroy the button focus was on and drop focus to <body>.
+  focusEditor();
+  announce('Editing message. Press Escape to cancel.');
+}
+
+// Focus the markdown editor if it exists, else the first field in the form.
+function focusEditor() {
+  if (editor && typeof editor.focus === 'function') {
+    try {
+      editor.focus();
+      return;
+    } catch (err) {
+      console.warn('Editor focus failed:', err);
+    }
+  }
+  if (composeTitle) composeTitle.focus();
 }
 
 function cancelEdit() {
+  const wasEditing = state.editing && state.editing.id;
   state.editing = null;
   composeTitle.value = '';
   if (composeTags) composeTags.value = '';
@@ -925,6 +1639,12 @@ function cancelEdit() {
   composeEditBanner.hidden = true;
   // renderMessages restores the compose form to its home and un-hides the card.
   renderMessages();
+  // Return focus to the control that opened the editor.
+  if (wasEditing) {
+    const card = messageEls.get(wasEditing);
+    const btn = card && card.querySelector('.edit-btn');
+    if (btn) btn.focus();
+  }
 }
 
 // Send message from compose form
@@ -964,6 +1684,21 @@ if (typeof toastui !== 'undefined' && toastui.Editor) {
 
 sendBtn.addEventListener('click', sendMessage);
 
+// Cmd/Ctrl+Enter sends, Escape cancels an edit — the conventions for a
+// multi-line composer, neither of which the app previously supported.
+document.addEventListener('keydown', (e) => {
+  if (!composeEl || !composeEl.contains(document.activeElement)) return;
+  if (e.key === 'Escape' && state.editing) {
+    e.preventDefault();
+    cancelEdit();
+    return;
+  }
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
 async function sendMessage() {
   const body = editor ? editor.getMarkdown().trim() : '';
   if (!body || !state.activeTopic) return;
@@ -980,16 +1715,16 @@ async function sendMessage() {
     if (isE2eeTopic(topic)) {
       const key = state.topicKeys[topic];
       if (!key) {
-        window.alert('No key loaded for this topic — cannot encrypt.');
+        toastError('No passphrase loaded for this topic, so the message can\'t be encrypted.');
         return;
       }
       if (editing) {
-        await fetch(`/${editing.topic}/messages/${editing.id}`, { method: 'DELETE' });
+        await apiFetch(`/${editing.topic}/messages/${editing.id}`, { method: 'DELETE' });
       }
       const meta = state.topicMeta[topic];
       const fields = { title, message: body, tags, markdown: true };
       const envelope = await PigeonCrypto.encryptFields(key, fields, meta.salt, meta.iter);
-      await fetch(`/${topic}`, {
+      await apiFetch(`/${topic}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/vnd.pigeon.e2ee+json',
@@ -1000,14 +1735,14 @@ async function sendMessage() {
       });
     } else {
       if (editing) {
-        await fetch(`/${editing.topic}/messages/${editing.id}`, { method: 'DELETE' });
+        await apiFetch(`/${editing.topic}/messages/${editing.id}`, { method: 'DELETE' });
       }
       const headers = {};
       if (title) headers['X-Title'] = title;
       if (tags) headers['X-Tags'] = tags;
       headers['X-Markdown'] = '1';
       headers['X-Priority'] = priority;
-      await fetch(`/${topic}`, {
+      await apiFetch(`/${topic}`, {
         method: 'POST',
         headers,
         body,
@@ -1024,19 +1759,47 @@ async function sendMessage() {
       // The pending DELETE will remove the card moments later via the WS event.
       renderMessages();
     }
+    announce(editing ? 'Message saved' : 'Message sent');
   } catch (err) {
     console.error('Send failed:', err);
+    // Leave the composed text in place so a retry doesn't mean retyping it.
+    toastError(
+      editing ? "Couldn't save your changes." : "Couldn't send your message.",
+      { actionLabel: 'Retry', onAction: () => sendMessage() },
+    );
   } finally {
     sendBtn.disabled = false;
   }
 }
 
-// Clear messages for active topic
+// Clear messages for active topic. This deletes them server-side for every
+// subscriber and cannot be undone, so it always confirms first.
 clearMessagesBtn.addEventListener('click', async () => {
-  if (!state.activeTopic) return;
-  await fetch(`/${state.activeTopic}/messages`, { method: 'DELETE' });
-  state.messages[state.activeTopic] = [];
-  renderMessages();
+  const topic = state.activeTopic;
+  if (!topic) return;
+  const count = (state.messages[topic] || []).length;
+  if (count === 0) return;
+
+  const ok = await confirmDialog({
+    title: `Delete all messages in “${topic}”?`,
+    body: `This permanently deletes ${count} message${count === 1 ? '' : 's'} on the server, for every subscriber to this topic. It can't be undone.`,
+    confirmLabel: `Delete ${count} message${count === 1 ? '' : 's'}`,
+    destructive: true,
+  });
+  if (!ok) return;
+
+  clearMessagesBtn.disabled = true;
+  try {
+    await apiFetch(`/${topic}/messages`, { method: 'DELETE' });
+    state.messages[topic] = [];
+    renderMessages();
+    showToast(`Deleted ${count} message${count === 1 ? '' : 's'} from ${topic}.`);
+  } catch (err) {
+    console.error('Clear messages failed:', err);
+    toastError("Couldn't delete the messages.");
+  } finally {
+    clearMessagesBtn.disabled = false;
+  }
 });
 
 // Clear only completed todos (originals + their done-marker messages). Each
@@ -1049,13 +1812,26 @@ if (clearCompletedBtn) {
     const { doneIds, markerIds } = getDoneTodoIds(all);
     const ids = [...doneIds, ...markerIds];
     if (ids.length === 0) return;
-    if (doneIds.size > 3 && !confirm(`Delete ${doneIds.size} completed task(s)?`)) return;
+
+    // Confirm every time, not only past an arbitrary count of three — the
+    // deletion is server-side and irreversible whether it's one task or ten.
+    const ok = await confirmDialog({
+      title: `Delete ${doneIds.size} completed task${doneIds.size === 1 ? '' : 's'}?`,
+      body: 'Completed tasks are removed from the server for every subscriber to this topic. This can\'t be undone.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
 
     clearCompletedBtn.disabled = true;
     try {
       await Promise.all(ids.map(id =>
-        fetch(`/${topic}/messages/${id}`, { method: 'DELETE' })
+        apiFetch(`/${topic}/messages/${id}`, { method: 'DELETE' })
       ));
+      showToast(`Deleted ${doneIds.size} completed task${doneIds.size === 1 ? '' : 's'}.`);
+    } catch (err) {
+      console.error('Clear completed failed:', err);
+      toastError("Couldn't delete every completed task. Some may remain.");
     } finally {
       clearCompletedBtn.disabled = false;
     }
@@ -1065,7 +1841,7 @@ if (clearCompletedBtn) {
 // Push notification helpers
 async function registerPushForTopic(topic, subscription) {
   try {
-    await fetch(`/${topic}/push/subscribe`, {
+    await apiFetch(`/${topic}/push/subscribe`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1078,19 +1854,83 @@ async function registerPushForTopic(topic, subscription) {
     });
   } catch (err) {
     console.error(`Push registration failed for topic ${topic}:`, err);
+    toastError(`Push notifications couldn't be enabled for ${topic}.`, {
+      actionLabel: 'Retry',
+      onAction: () => registerPushForTopic(topic, subscription),
+    });
   }
+}
+
+// Push has three states, not two: not enabled, enabled, and blocked at the OS
+// or browser level. The blocked state used to be invisible — denying the
+// permission left the button reading "Enable Push Notifications" forever.
+function setPushHint(message) {
+  if (!pushHint) return;
+  pushHint.textContent = message || '';
+  pushHint.hidden = !message;
+}
+
+function renderPushState() {
+  if (!enablePushBtn) return;
+  const supported = 'Notification' in window && 'serviceWorker' in navigator && 'PushManager' in window;
+
+  if (!supported) {
+    enablePushBtn.disabled = true;
+    enablePushBtn.textContent = 'Push Unavailable';
+    setPushHint(isIosSafariNotInstalled()
+      ? 'Add Pigeon to your Home Screen to receive push notifications on iOS.'
+      : 'This browser doesn\'t support Web Push.');
+    return;
+  }
+
+  if (state.pushEnabled) {
+    enablePushBtn.disabled = true;
+    enablePushBtn.textContent = 'Push Enabled';
+    enablePushBtn.classList.add('enabled');
+    setPushHint('');
+    return;
+  }
+
+  if (Notification.permission === 'denied') {
+    enablePushBtn.disabled = true;
+    enablePushBtn.textContent = 'Push Blocked';
+    enablePushBtn.classList.remove('enabled');
+    setPushHint('Notifications are blocked for this site. Re-enable them in your browser\'s site settings, then reload.');
+    return;
+  }
+
+  enablePushBtn.disabled = false;
+  enablePushBtn.textContent = 'Enable Push Notifications';
+  enablePushBtn.classList.remove('enabled');
+  setPushHint('');
+}
+
+// iOS only exposes Web Push to a PWA installed to the Home Screen.
+function isIosSafariNotInstalled() {
+  const iOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const standalone = window.navigator.standalone === true ||
+    window.matchMedia('(display-mode: standalone)').matches;
+  return iOS && !standalone;
 }
 
 // Push notification setup
 enablePushBtn.addEventListener('click', async () => {
   if (state.pushEnabled) return;
 
+  enablePushBtn.disabled = true;
   try {
     const permission = await Notification.requestPermission();
-    if (permission !== 'granted') return;
+    if (permission !== 'granted') {
+      renderPushState();
+      showToast(permission === 'denied'
+        ? 'Notifications are blocked. Re-enable them in your browser\'s site settings.'
+        : 'Push notifications were not enabled.');
+      return;
+    }
 
     const reg = await navigator.serviceWorker.ready;
-    const vapidKeyResponse = await fetch('/vapid-key');
+    const vapidKeyResponse = await apiFetch('/vapid-key');
     const vapidKey = await vapidKeyResponse.text();
 
     const subscription = await reg.pushManager.subscribe({
@@ -1106,10 +1946,15 @@ enablePushBtn.addEventListener('click', async () => {
     }
 
     state.pushEnabled = true;
-    enablePushBtn.textContent = 'Push Enabled';
-    enablePushBtn.classList.add('enabled');
+    renderPushState();
+    showToast('Push notifications enabled.', { tone: 'success' });
   } catch (err) {
     console.error('Push subscription failed:', err);
+    renderPushState();
+    toastError("Couldn't enable push notifications.", {
+      actionLabel: 'Retry',
+      onAction: () => enablePushBtn.click(),
+    });
   }
 });
 
@@ -1337,13 +2182,19 @@ document.addEventListener('visibilitychange', async () => {
     } else {
       // Connection alive, but re-fetch to catch missed messages
       try {
-        const res = await fetch(`/${topic}/json?since=all`);
+        const res = await apiFetch(`/${topic}/json?since=all`);
         const msgs = await res.json();
+        await Promise.all(msgs.map(m => tryDecryptMessage(topic, m)));
         state.messages[topic] = msgs.reverse();
+        // Catching up isn't the same as receiving — don't animate the backlog.
+        markMessagesSeen(topic);
         if (state.activeTopic === topic) renderMessages();
-      } catch {}
+      } catch (err) {
+        console.warn(`Refresh for ${topic} failed:`, err);
+      }
     }
   }
+  renderConnectionStatus();
 });
 
 init();

@@ -4,7 +4,10 @@
   --color-bg: #faf8f5;
   --color-surface: #fff;
   --color-text: #2c2418;
-  --color-text-secondary: #8c7a66;
+  /* Meets 4.5:1 against --color-bg, --color-surface and --color-tab-bg, the
+     three surfaces this token actually lands on. The previous #8c7a66 was
+     between 3.1:1 and 4.1:1 on all of them. */
+  --color-text-secondary: #6b5b48;
   --color-text-muted: #5a4a38;
   --color-border: #d4c5b0;
   --color-accent-green: #7a8b5c;
@@ -12,11 +15,25 @@
   --color-tab-bg: #e8dfd3;
   --color-code-bg: #1a1510;
   --color-code-text: #d4a86c;
+  --color-error: #a52d20;
   --color-priority-5: #c0392b;
-  --color-priority-4: #d4813a;
+  --color-priority-4: #a95f18;
   --color-priority-3: #654f44;
-  --color-priority-2: #8c7a66;
-  --color-priority-1: #d4c5b0;
+  --color-priority-2: #6b5b48;
+  --color-priority-1: #8a7a63;
+  --priority-5-wash: rgba(192, 57, 43, 0.08);
+  --priority-4-wash: rgba(212, 129, 58, 0.07);
+  /* The accent colours are tuned for the 4px accent bar. Badge *text* sits on a
+     14% tint of the same hue and needs its own, darker value to clear 4.5:1. */
+  --color-priority-5-text: #8c2418;
+  --color-priority-4-text: #71400d;
+  --color-priority-3-text: #3d2f26;
+
+  /* An inverted surface (dark panel on a light page). Defined per scheme so it
+     doesn't flip when the text/background tokens do. */
+  --color-surface-inverse: #2c2418;
+  --color-on-surface-inverse: #e8dfd3;
+  --color-on-surface-inverse-secondary: #b9a992;
 
   --shadow-sm: 0 1px 2px rgba(44, 36, 24, 0.06);
   --shadow-md: 0 2px 8px rgba(44, 36, 24, 0.08), 0 1px 2px rgba(44, 36, 24, 0.04);
@@ -45,7 +62,7 @@
     --color-surface: #1a1714;
     --color-text: #e8dfd3;
     --color-text-secondary: #a89784;
-    --color-text-muted: #8c7a66;
+    --color-text-muted: #b5a894;
     --color-border: #3a322a;
     --shadow-card: 0 1px 0 rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.6);
     --shadow-card-hover: 0 1px 0 rgba(0, 0, 0, 0.4), 0 14px 32px -14px rgba(0, 0, 0, 0.7);
@@ -54,6 +71,26 @@
     --color-tab-bg: #2c2418;
     --color-code-bg: #0a0806;
     --color-code-text: #d4a86c;
+    --color-error: #ef8a7d;
+    /* Priority tokens were previously defined only once, so the light-mode
+       values stayed in force on dark surfaces — #c0392b badge text on #1a1714
+       is 3.3:1. These are the dark-scheme equivalents. */
+    --color-priority-5: #ef8a7d;
+    --color-priority-4: #e0a86a;
+    --color-priority-3: #d4a86c;
+    --color-priority-2: #a89784;
+    --color-priority-1: #8c7a66;
+    --priority-5-wash: rgba(239, 138, 125, 0.10);
+    --priority-4-wash: rgba(224, 168, 106, 0.09);
+    --color-priority-5-text: #f5a89e;
+    --color-priority-4-text: #e8bb87;
+    --color-priority-3-text: #dcb684;
+
+    /* On a dark page the inverted panel becomes a *lighter* elevated surface,
+       not a cream block. */
+    --color-surface-inverse: #241f19;
+    --color-on-surface-inverse: #e8dfd3;
+    --color-on-surface-inverse-secondary: #b0a08c;
   }
 }
 
@@ -78,11 +115,211 @@ code, pre {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
+/* Content that must reach assistive tech but not the screen. */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: absolute;
+  left: 0.5rem;
+  top: -100%;
+  z-index: 100;
+  padding: 0.75rem 1.25rem;
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-md);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.skip-link:focus {
+  top: 0.5rem;
+}
+
 .container {
   max-width: 640px;
   margin: 0 auto;
-  padding: 2rem 1rem;
+  /* Respect the notch / home indicator when installed to the Home Screen.
+     max() keeps the original padding as the floor. */
+  padding:
+    max(2rem, env(safe-area-inset-top))
+    max(1rem, env(safe-area-inset-right))
+    max(2rem, env(safe-area-inset-bottom))
+    max(1rem, env(safe-area-inset-left));
 }
+
+/* --- Snackbars ---------------------------------------------------------- */
+
+.toast-region {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: max(1rem, env(safe-area-inset-bottom));
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: min(30rem, calc(100vw - 2rem));
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 0.75rem 0.75rem 1rem;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-inverse);
+  color: var(--color-on-surface-inverse);
+  box-shadow: var(--shadow-lg);
+  font-size: 0.9rem;
+  pointer-events: auto;
+  animation: toastIn var(--dur-med) var(--ease-out);
+}
+
+.toast-error {
+  background: var(--color-error);
+  color: var(--color-bg);
+}
+
+.toast-success {
+  background: var(--color-accent-green-dark);
+  color: #fff;
+}
+
+.toast-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.toast-action,
+.toast-close {
+  flex-shrink: 0;
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0.5rem;
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.toast-close {
+  font-size: 1.1rem;
+  font-weight: 400;
+  text-transform: none;
+  opacity: 0.75;
+}
+
+.toast-action:hover,
+.toast-close:hover {
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  opacity: 1;
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* --- Dialog ------------------------------------------------------------- */
+
+.app-dialog {
+  /* The global `* { margin: 0 }` reset overrides the UA's `margin: auto`, which
+     is what centres a modal <dialog> in the top layer. */
+  margin: auto;
+  width: min(28rem, calc(100vw - 2rem));
+  padding: 1.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  color: var(--color-text);
+  box-shadow: var(--shadow-lg);
+}
+
+.app-dialog::backdrop {
+  background: rgba(20, 16, 10, 0.55);
+}
+
+.app-dialog-title {
+  font-size: 1.1rem;
+  margin-bottom: 0.5rem;
+}
+
+.app-dialog-body {
+  color: var(--color-text-secondary);
+  font-size: 0.9rem;
+  margin-bottom: 1.25rem;
+}
+
+.app-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* --- Field messages ----------------------------------------------------- */
+
+.field-hint,
+.field-error {
+  font-size: 0.8rem;
+  margin-top: 0.4rem;
+}
+
+.field-hint {
+  color: var(--color-text-secondary);
+}
+
+.field-error {
+  color: var(--color-error);
+  font-weight: 500;
+}
+
+/* --- Connection status -------------------------------------------------- */
+
+.connection-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+
+/* The dot is decorative — the state is always spelled out in text so it never
+   depends on colour alone (WCAG 1.4.1). */
+.connection-status::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-text-secondary);
+}
+
+.connection-status[data-state="live"]::before { background: var(--color-accent-green); }
+.connection-status[data-state="reconnecting"]::before,
+.connection-status[data-state="partial"]::before { background: var(--color-priority-4); }
+.connection-status[data-state="offline"]::before { background: var(--color-error); }
 
 header {
   text-align: center;
@@ -124,6 +361,7 @@ header h1 {
 
 .input-group input {
   flex: 1;
+  min-height: 44px;
   padding: 0.75rem 1rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -156,15 +394,21 @@ header h1 {
   user-select: none;
 }
 
+.e2ee-label {
+  min-height: 44px;
+}
+
 .e2ee-label input[type="checkbox"] {
   accent-color: var(--color-primary);
   width: 1rem;
   height: 1rem;
+  position: relative;
 }
 
 .e2ee-passphrase {
   flex: 1;
   min-width: 12rem;
+  min-height: 44px;
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -180,8 +424,7 @@ header h1 {
 
 .topic-lock {
   margin-right: 0.25rem;
-  font-size: 0.8em;
-  opacity: 0.85;
+  font-size: 0.9em;
 }
 
 .locked-message .locked-body {
@@ -212,7 +455,16 @@ button {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
   margin-bottom: 1rem;
+}
+
+.topics-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
 }
 
 .topics-header h2 {
@@ -226,29 +478,52 @@ button {
   margin-bottom: 1rem;
 }
 
+/* A tab is a wrapper holding two sibling buttons. The remove control used to be
+   nested inside the tab button — invalid, and unreachable by keyboard. */
 .topic-tab {
-  padding: 0.4rem 1rem;
+  display: inline-flex;
+  align-items: stretch;
   background: var(--color-tab-bg);
   border-radius: var(--radius-pill);
-  font-size: 0.85rem;
-  cursor: pointer;
   transition: background var(--dur-fast) var(--ease-out),
               color var(--dur-fast) var(--ease-out),
               transform var(--dur-fast) var(--ease-out),
               opacity var(--dur-fast) var(--ease-out);
-  border: none;
   color: var(--color-text-secondary);
-  opacity: 0.85;
+  max-width: 100%;
+}
+
+.topic-tab-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 44px;
+  padding: 0.4rem 0.35rem 0.4rem 1rem;
+  font-size: 0.85rem;
+  font-family: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  border-radius: var(--radius-pill) 0 0 var(--radius-pill);
+  cursor: pointer;
+  min-width: 0;
+}
+
+/* Long topic names truncate rather than forcing the tab row to wrap. */
+.topic-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 14rem;
 }
 
 .topic-tab:hover {
-  opacity: 1;
+  background: color-mix(in srgb, var(--color-primary) 12%, var(--color-tab-bg));
 }
 
 .topic-tab.active {
   background: var(--color-primary);
   color: var(--color-bg);
-  opacity: 1;
   transform: scale(1.03);
 }
 
@@ -257,24 +532,36 @@ button {
   background: var(--color-border);
 }
 
+/* The × was an 8×15px span. It's now a real button meeting the 44pt/48dp
+   minimum, with the glyph kept visually small. */
 .topic-tab .remove {
-  margin-left: 0.5rem;
-  opacity: 0.6;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 0.6rem 0 0.25rem;
+  font-size: 1rem;
+  line-height: 1;
+  color: inherit;
+  background: none;
+  border: none;
+  border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
+  cursor: pointer;
 }
 
 .topic-tab .remove:hover {
-  opacity: 1;
+  background: color-mix(in srgb, currentColor 12%, transparent);
 }
 
 .unread-badge {
   display: inline-block;
-  background: var(--color-priority-5);
-  color: #fff;
+  background: var(--color-error);
+  color: var(--color-bg);
   border-radius: 12px;
   padding: 0 0.4rem;
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   font-weight: 700;
-  margin-left: 0.4rem;
   vertical-align: middle;
 }
 
@@ -300,11 +587,17 @@ button {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   padding: 1rem 1rem 1rem 1.25rem;
-  animation: slideDownIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
   box-shadow: var(--shadow-card);
   transition: box-shadow var(--dur-med) var(--ease-out), transform var(--dur-med) var(--ease-out);
   overflow: hidden;
   --accent: var(--color-primary);
+}
+
+/* The entrance animation used to be on every card, and the list was rebuilt on
+   every render — so the whole list re-animated whenever anything changed. It
+   now runs only for cards rendered for the first time. */
+.message-card.is-new {
+  animation: slideDownIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .message-card::before {
@@ -331,16 +624,50 @@ button {
   gap: 0.5rem;
 }
 
+.msg-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.msg-title {
+  font-size: 1rem;
+  font-weight: 500;
+  min-width: 0;
+}
+
 .msg-header-right {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.25rem;
+  flex-shrink: 0;
+}
+
+.msg-time {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.btn-icon {
+  display: flex;
+}
+
+.msg-priority-icon {
+  display: inline-flex;
+  margin-right: 4px;
+  vertical-align: text-bottom;
 }
 
 .copy-btn {
   background: transparent;
   border: none;
   padding: 4px;
+  min-width: 44px;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   color: var(--color-text-secondary);
   border-radius: var(--radius-sm);
@@ -377,6 +704,10 @@ button {
   background: transparent;
   border: none;
   padding: 4px;
+  min-width: 44px;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   color: var(--color-text-secondary);
   border-radius: var(--radius-sm);
@@ -385,6 +716,16 @@ button {
               color var(--dur-fast) var(--ease-out);
   display: flex;
   opacity: 0.35;
+}
+
+/* Hover-reveal is meaningless on touch — these were permanently 35%-opacity
+   icons on a phone. Show them outright where there's no hover. */
+@media (hover: none) {
+  .edit-btn,
+  .copy-btn,
+  .code-copy-btn {
+    opacity: 1;
+  }
 }
 
 .message-card:hover .edit-btn,
@@ -418,6 +759,15 @@ button {
   transition: background var(--dur-fast) var(--ease-out);
 }
 
+/* Extend the tap area past 44px without changing the small visual box. */
+.todo-checkbox::before,
+.msg-body .md-task-checkbox::before,
+.e2ee-label input[type="checkbox"]::before {
+  content: "";
+  position: absolute;
+  inset: -16px;
+}
+
 .todo-checkbox:hover:not(:disabled) {
   background: color-mix(in srgb, var(--color-accent-green) 15%, transparent);
 }
@@ -448,7 +798,7 @@ button {
 
 .msg-body.todo-done {
   text-decoration: line-through;
-  opacity: 0.55;
+  color: var(--color-text-secondary);
 }
 
 .msg-body .md-task-checkbox {
@@ -514,20 +864,22 @@ button {
 .code-wrapper {
   position: relative;
   margin: 0.5rem 0;
+  min-width: 0;
 }
 
 .code-copy-btn {
   position: absolute;
   top: 0.5rem;
   right: 0.5rem;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.28);
   color: #fff;
-  font-size: 0.7rem;
-  padding: 2px 8px;
+  font-size: 0.75rem;
+  min-height: 28px;
+  padding: 4px 10px;
   border-radius: 4px;
   cursor: pointer;
-  opacity: 0.4;
+  opacity: 0.9;
   transition: opacity var(--dur-fast) var(--ease-out),
               background var(--dur-fast) var(--ease-out),
               transform var(--dur-fast) var(--ease-out);
@@ -612,11 +964,11 @@ button {
 
 .priority-5 {
   --accent: var(--color-priority-5);
-  background: linear-gradient(90deg, rgba(192, 57, 43, 0.08) 0%, var(--color-surface) 42%);
+  background: linear-gradient(90deg, var(--priority-5-wash) 0%, var(--color-surface) 42%);
 }
 .priority-4 {
   --accent: var(--color-priority-4);
-  background: linear-gradient(90deg, rgba(212, 129, 58, 0.07) 0%, var(--color-surface) 42%);
+  background: linear-gradient(90deg, var(--priority-4-wash) 0%, var(--color-surface) 42%);
 }
 .priority-3 { --accent: var(--color-priority-3); }
 .priority-2 { --accent: var(--color-priority-2); }
@@ -625,7 +977,7 @@ button {
 .msg-priority-badge {
   display: inline-flex;
   align-items: center;
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   font-weight: 600;
   padding: 0.15rem 0.55rem;
   border-radius: var(--radius-pill);
@@ -634,8 +986,12 @@ button {
   margin-left: 0.5rem;
   flex-shrink: 0;
   background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
+
+.priority-5 { --accent-text: var(--color-priority-5-text); }
+.priority-4 { --accent-text: var(--color-priority-4-text); }
+.priority-3 { --accent-text: var(--color-priority-3-text); }
 
 .msg-image {
   margin-top: 0.5rem;
@@ -646,6 +1002,12 @@ button {
   border-radius: 6px;
   max-height: 300px;
   object-fit: contain;
+  /* Reserve space so a late-loading image doesn't shift the list under the
+     reader's cursor. */
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  height: auto;
+  background: var(--color-tab-bg);
 }
 
 .msg-tags {
@@ -655,17 +1017,32 @@ button {
   gap: 0.4rem;
 }
 
+/* A real <button>, not a <span> — the chips were previously unreachable by
+   keyboard, so tag filtering couldn't be used without a mouse. */
 .tag-chip {
-  font-size: 0.7rem;
+  display: inline-flex;
+  align-items: center;
+  font-family: inherit;
+  font-size: 0.75rem;
   font-weight: 500;
-  padding: 0.2rem 0.6rem;
+  min-height: 32px;
+  padding: 0.2rem 0.7rem;
   background: var(--color-tab-bg);
   color: var(--color-text-secondary);
+  border: none;
   border-radius: var(--radius-pill);
   cursor: pointer;
   transition: background var(--dur-fast) var(--ease-out),
               color var(--dur-fast) var(--ease-out),
               transform var(--dur-fast) var(--ease-out);
+}
+
+@media (pointer: coarse) {
+  .tag-chip {
+    min-height: 44px;
+    min-width: 44px;
+    justify-content: center;
+  }
 }
 
 .tag-chip:hover {
@@ -733,6 +1110,7 @@ button {
 
 .compose input,
 .compose select {
+  min-height: 44px;
   padding: 0.55rem 0.8rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -782,7 +1160,6 @@ button {
   font-size: 0.95rem;
   font-weight: 500;
   pointer-events: none;
-  opacity: 0.7;
 }
 
 .compose-tags-input {
@@ -792,8 +1169,20 @@ button {
 
 .compose-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 0.75rem;
   margin-top: 0.25rem;
+}
+
+.compose-hint {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+}
+
+/* Pointer-coarse devices don't have a modifier key to show off. */
+@media (pointer: coarse) {
+  .compose-hint { display: none; }
 }
 
 /* Button system */
@@ -802,6 +1191,9 @@ button {
   align-items: center;
   justify-content: center;
   gap: 0.4rem;
+  /* 44px is the iOS HIG minimum tappable dimension; Material asks for 48dp.
+     Applied for all pointer types — it helps mouse users too. */
+  min-height: 44px;
   padding: 0.6rem 1.25rem;
   font-size: 0.9rem;
   font-family: inherit;
@@ -813,6 +1205,11 @@ button {
               color var(--dur-fast) var(--ease-out),
               border-color var(--dur-fast) var(--ease-out),
               transform var(--dur-fast) var(--ease-out);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .btn:active {
@@ -855,23 +1252,48 @@ button {
   background: color-mix(in srgb, var(--color-primary) 8%, transparent);
 }
 
+/* Destructive actions get their own colour role so they don't read as ordinary
+   low-emphasis controls. */
+.btn-destructive {
+  color: var(--color-error);
+}
+
+.btn-destructive:hover {
+  color: var(--color-error);
+  background: color-mix(in srgb, var(--color-error) 10%, transparent);
+}
+
+.btn-danger {
+  background: var(--color-error);
+  color: var(--color-bg);
+}
+
+.btn-danger:hover {
+  background: color-mix(in srgb, var(--color-error) 85%, #000);
+}
+
+/* Uses dedicated surface tokens. It previously set `background: var(--color-text)`
+   — a *text* token used as a background — so in dark mode the panel inverted
+   into the brightest element on the page. */
 .usage {
   margin-top: 3rem;
   padding: 1.5rem;
-  background: var(--color-text);
+  background: var(--color-surface-inverse);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  color: var(--color-tab-bg);
+  color: var(--color-on-surface-inverse);
   box-shadow: var(--shadow-lg);
+  min-width: 0;
 }
 
 .usage h2 {
   font-size: 1rem;
   margin-bottom: 0.75rem;
-  color: var(--color-text-secondary);
+  color: var(--color-on-surface-inverse-secondary);
 }
 
 .usage p {
-  color: var(--color-text-secondary);
+  color: var(--color-on-surface-inverse-secondary);
   font-size: 0.85rem;
   margin: 0.75rem 0 0.5rem;
 }
@@ -882,6 +1304,7 @@ button {
   border-radius: var(--radius-sm);
   overflow-x: auto;
   font-size: 0.85rem;
+  min-width: 0;
 }
 
 .usage code {
@@ -939,16 +1362,20 @@ button {
   100% { transform: scale(1); }
 }
 
+/* A box-shadow focus ring is stripped in forced-colors mode, and the old rule
+   also set `outline: none` — leaving Windows High Contrast users with no focus
+   indicator at all. An outline survives both. */
 :focus-visible {
-  outline: none;
-  box-shadow: var(--shadow-focus-ring);
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
 
-.btn:focus-visible,
-.topic-tab:focus-visible,
-.tag-chip:focus-visible {
-  box-shadow: var(--shadow-focus-ring);
+@media (forced-colors: active) {
+  :focus-visible {
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1008,4 +1435,11 @@ button {
 }
 .toastui-editor-md-preview {
   color: var(--color-text) !important;
+}
+
+/* Reserve a lane for the copy button so long lines scroll past it instead of
+   running underneath it. Declared last so it wins over the `.usage pre` and
+   `.msg-body pre` padding shorthands regardless of their source order. */
+.code-wrapper pre {
+  padding-right: 4.5rem;
 }

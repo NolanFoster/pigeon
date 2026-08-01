@@ -206,7 +206,7 @@ test('topics can be reordered via drag and drop', async ({ page }) => {
   // forceFallback mode, which tracks the drag through incremental mousemove
   // events — a single jump (Playwright's dragTo) never repositions the clone,
   // so we move in steps the way a real pointer drag does.
-  const src = await tabs.nth(0).boundingBox();
+  const src = await tabs.nth(0).locator('.topic-tab-select').boundingBox();
   const dst = await tabs.nth(2).boundingBox();
   await page.mouse.move(src.x + src.width / 2, src.y + src.height / 2);
   await page.mouse.down();
@@ -257,7 +257,7 @@ test('topic tabs support click-to-switch and click-to-close with multiple topics
   // within normal click jitter but is enough that Sortable's default native
   // HTML5 drag starts a drag and swallows the click — so this step fails before
   // the forceFallback fix and passes after it.
-  await realClick(page.locator('.topic-tab', { hasText: 'click-a' }), 6, 2);
+  await realClick(page.locator('.topic-tab', { hasText: 'click-a' }).locator('.topic-tab-select'), 6, 2);
   await expect(page.locator('.topic-tab.active')).toContainText('click-a');
 
   // Remove via the × — a small target, so keep the jitter tiny enough to stay
@@ -268,4 +268,137 @@ test('topic tabs support click-to-switch and click-to-close with multiple topics
 
   await realClick(page.locator('.topic-tab.active').locator('.remove'), 2, 1);
   await expect(page.locator('.topic-tab')).toHaveCount(1);
+});
+
+test('Clear requires confirmation and can be cancelled', async ({ page, request, baseURL }) => {
+  const topic = `smoke-clear-${Date.now()}`;
+
+  await page.goto('/');
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#subscribe-btn').click();
+  await expect(page.locator('.topic-tab.active')).toContainText(topic);
+
+  await request.post(`${baseURL}/${topic}`, { data: 'keep me' });
+  await expect(page.locator('.message-card')).toHaveCount(1);
+
+  // Cancelling the dialog must leave the messages alone.
+  await page.locator('#clear-messages-btn').click();
+  const dialog = page.locator('#app-dialog');
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('permanently deletes');
+  await page.locator('#app-dialog-cancel').click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator('.message-card')).toHaveCount(1);
+
+  // Confirming deletes and reports what happened.
+  await page.locator('#clear-messages-btn').click();
+  await page.locator('#app-dialog-confirm').click();
+  await expect(page.locator('.message-card')).toHaveCount(0);
+  await expect(page.locator('.toast')).toContainText('Deleted 1 message');
+});
+
+test('unsubscribing a plain topic offers an undo', async ({ page }) => {
+  await page.goto('/');
+  const topic = `smoke-undo-${Date.now()}`;
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#subscribe-btn').click();
+  await expect(page.locator('.topic-tab')).toHaveCount(1);
+
+  await page.locator('.topic-tab .remove').click();
+  await expect(page.locator('.topic-tab')).toHaveCount(0);
+
+  await page.locator('.toast-action', { hasText: 'Undo' }).click();
+  await expect(page.locator('.topic-tab')).toHaveCount(1);
+  await expect(page.locator('.topic-tab')).toContainText(topic);
+});
+
+test('an arriving message does not steal keyboard focus', async ({ page, request, baseURL }) => {
+  const topic = `smoke-focus-${Date.now()}`;
+
+  await page.goto('/');
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#subscribe-btn').click();
+  await expect(page.locator('.topic-tab.active')).toContainText(topic);
+
+  await request.post(`${baseURL}/${topic}`, { headers: { 'X-Title': 'First' }, data: 'one' });
+  await expect(page.locator('.message-card')).toHaveCount(1);
+
+  // Park focus on the first card's copy button, then publish a second message.
+  await page.locator('.message-card .copy-btn').first().focus();
+  const before = await page.evaluate(() => document.activeElement.getAttribute('aria-label'));
+  expect(before).toContain('First');
+
+  await request.post(`${baseURL}/${topic}`, { headers: { 'X-Title': 'Second' }, data: 'two' });
+  await expect(page.locator('.message-card')).toHaveCount(2);
+
+  // The list used to be rebuilt via innerHTML on every arrival, which dropped
+  // focus to <body>.
+  const after = await page.evaluate(() => document.activeElement.getAttribute('aria-label'));
+  expect(after).toBe(before);
+});
+
+test('tag chips are reachable and operable by keyboard', async ({ page, request, baseURL }) => {
+  const topic = `smoke-kbd-${Date.now()}`;
+
+  await page.goto('/');
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#subscribe-btn').click();
+  await expect(page.locator('.topic-tab.active')).toContainText(topic);
+
+  await request.post(`${baseURL}/${topic}`, { headers: { 'X-Title': 'A', 'X-Tags': 'alpha' }, data: 'first' });
+  await request.post(`${baseURL}/${topic}`, { headers: { 'X-Title': 'B', 'X-Tags': 'beta' }, data: 'second' });
+  await expect(page.locator('.message-card')).toHaveCount(2);
+
+  const chip = page.locator('.tags-row .tag-chip', { hasText: 'alpha' });
+  await expect(chip).toHaveJSProperty('tagName', 'BUTTON');
+  await chip.focus();
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('.filter-banner')).toBeVisible();
+  await expect(page.locator('.message-card')).toHaveCount(1);
+});
+
+test('topic tabs implement the ARIA tabs pattern with arrow-key navigation', async ({ page }) => {
+  await page.goto('/');
+  for (const t of ['kb-a', 'kb-b']) {
+    await page.locator('#topic-input').fill(t);
+    await page.locator('#subscribe-btn').click();
+    await expect(page.locator('.topic-tab.active')).toContainText(t);
+  }
+
+  const tabs = page.locator('.topic-tab-select');
+  await expect(tabs.nth(1)).toHaveAttribute('aria-selected', 'true');
+  await expect(tabs.nth(0)).toHaveAttribute('aria-selected', 'false');
+  await expect(page.locator('#topic-tabs')).toHaveAttribute('role', 'tablist');
+
+  // Roving tabindex: only the selected tab is in the tab order.
+  await expect(tabs.nth(1)).toHaveJSProperty('tabIndex', 0);
+  await expect(tabs.nth(0)).toHaveJSProperty('tabIndex', -1);
+
+  await tabs.nth(1).focus();
+  await page.keyboard.press('ArrowLeft');
+  await expect(page.locator('.topic-tab.active')).toContainText('kb-a');
+});
+
+test('a failed publish reports the error and keeps the composed text', async ({ page }) => {
+  const topic = `smoke-fail-${Date.now()}`;
+
+  await page.goto('/');
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#subscribe-btn').click();
+  await expect(page.locator('.topic-tab.active')).toContainText(topic);
+
+  // Fail only the publish POST, leaving the WebSocket and history intact.
+  await page.route(`**/${topic}`, (route) =>
+    route.request().method() === 'POST'
+      ? route.fulfill({ status: 500, body: 'nope' })
+      : route.continue());
+
+  await page.evaluate(() => editor.setMarkdown('this should survive'));
+  await page.locator('#send-btn').click();
+
+  await expect(page.locator('.toast-error')).toContainText("Couldn't send your message");
+  // The draft used to be discarded even when the publish failed.
+  await expect.poll(() => page.evaluate(() => editor.getMarkdown()))
+    .toBe('this should survive');
 });
