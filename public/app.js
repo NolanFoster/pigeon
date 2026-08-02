@@ -15,6 +15,9 @@ const state = {
   unreadCounts: {},
   pushEnabled: false,
   pushSubscription: null,
+  // True while an enable/disable is in flight, so the button can't be
+  // double-fired into an inconsistent state.
+  pushBusy: false,
   filterTag: null,
 };
 
@@ -438,20 +441,39 @@ function initTopicSortable() {
 
 // Initialize
 async function init() {
+  // Push cleanup that shouldn't hold up the rest of startup, but has to run in
+  // order: a resumed teardown may queue work that the retry pass then picks up.
+  let pushStartup = Promise.resolve();
+
   if ('serviceWorker' in navigator) {
     await navigator.serviceWorker.register('/sw.js');
 
     const reg = await navigator.serviceWorker.ready;
     const existing = await reg.pushManager.getSubscription();
-    if (existing) {
+    migratePushPref(!!existing);
+
+    if (existing && pushPrefEnabled()) {
       state.pushEnabled = true;
       state.pushSubscription = existing;
       // Re-register push for all topics (idempotent via INSERT OR REPLACE on server)
       Promise.all(
         state.topics.map(topic => registerPushForTopic(topic, existing))
       ).catch(err => console.error('Push re-registration failed:', err));
+    } else if (existing) {
+      // Push is off but a live subscription is still out there — a teardown
+      // that was interrupted, or one the browser undid. Every reload used to
+      // re-register it, which is what made disabling feel impossible. Finish
+      // the job instead.
+      pushStartup = teardownPush(existing)
+        .catch(err => console.error('Resuming push teardown failed:', err));
     }
   }
+
+  // Anything the server never acknowledged gets another try on every load.
+  pushStartup
+    .then(flushPendingUnsubs)
+    .catch(err => console.error('Unsubscribe retry failed:', err))
+    .finally(renderPushState);
 
   renderPushState();
 
@@ -847,9 +869,13 @@ async function requestRemoveTopic(topic) {
       }
       localStorage.setItem('pigeon_topics', JSON.stringify(state.topics));
       connectTopic(topic);
-      if (state.pushEnabled && state.pushSubscription) {
-        registerPushForTopic(topic, state.pushSubscription);
-      }
+      // Re-register only once the removal's DELETE has landed, or the two
+      // requests race and the topic comes back without notifications.
+      (pushCleanupInFlight.get(topic) || Promise.resolve()).then(() => {
+        if (state.pushEnabled && state.pushSubscription) {
+          registerPushForTopic(topic, state.pushSubscription);
+        }
+      });
       selectTopic(topic);
       renderTopicTabs();
     },
@@ -861,6 +887,10 @@ function removeTopic(topic) {
   disconnectTopic(topic);
   state.topics = state.topics.filter(t => t !== topic);
   localStorage.setItem('pigeon_topics', JSON.stringify(state.topics));
+
+  // Closing the tab used to leave the server's push row in place, so
+  // notifications kept arriving for a topic no longer in the list.
+  cleanUpPushForTopic(topic);
 
   if (state.topicMeta[topic]) {
     delete state.topicMeta[topic];
@@ -1838,8 +1868,154 @@ if (clearCompletedBtn) {
   });
 }
 
-// Push notification helpers
+// ---------------------------------------------------------------------------
+// Push notifications
+//
+// Three separate things can each keep notifications arriving, so turning push
+// off has to deal with all three:
+//
+//   1. the browser's PushSubscription (the endpoint the push service delivers to)
+//   2. the server's push_subscriptions rows — one per topic, keyed by endpoint
+//   3. the user's intent, which has to survive a reload
+//
+// Disabling used to be impossible: the button turned into a disabled "Push
+// Enabled" chip with no off state, unsubscribing from a topic left its server
+// row behind, and every reload re-registered every topic from whatever
+// subscription the browser still had. Now intent is persisted, teardown is
+// resumable, and any DELETE the server didn't acknowledge is queued and retried.
+// ---------------------------------------------------------------------------
+
+const PUSH_PREF_KEY = 'pigeon_push_enabled';
+const PUSH_REGISTRATIONS_KEY = 'pigeon_push_registrations';
+const PUSH_PENDING_UNSUB_KEY = 'pigeon_push_pending_unsub';
+
+function readStoredArray(key) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    console.warn(`Discarding unreadable ${key}:`, err);
+    return [];
+  }
+}
+
+// The user's explicit choice. Anything other than a stored "1" means off, so a
+// wiped or corrupt value fails closed (no notifications) rather than open.
+function pushPrefEnabled() {
+  return localStorage.getItem(PUSH_PREF_KEY) === '1';
+}
+
+function setPushPref(on) {
+  localStorage.setItem(PUSH_PREF_KEY, on ? '1' : '0');
+}
+
+// Installs that enabled push before this preference existed have a live
+// subscription and no stored intent — that means on, not off.
+function migratePushPref(hasSubscription) {
+  if (localStorage.getItem(PUSH_PREF_KEY) === null && hasSubscription) setPushPref(true);
+}
+
+// Every (topic, endpoint) pair the server has been told about. Kept because the
+// topic list is not a reliable record of what the server still has: a topic
+// removed while offline, or an endpoint the browser rotated, would otherwise
+// keep pushing with nothing left to point at it.
+function loadPushRegistrations() {
+  return readStoredArray(PUSH_REGISTRATIONS_KEY);
+}
+
+function savePushRegistrations(list) {
+  localStorage.setItem(PUSH_REGISTRATIONS_KEY, JSON.stringify(list));
+}
+
+function rememberPushRegistration(topic, endpoint) {
+  const list = loadPushRegistrations();
+  if (list.some(r => r.topic === topic && r.endpoint === endpoint)) return;
+  list.push({ topic, endpoint });
+  savePushRegistrations(list);
+}
+
+function forgetPushRegistration(topic, endpoint) {
+  savePushRegistrations(loadPushRegistrations().filter(
+    r => !(r.endpoint === endpoint && (topic === null || r.topic === topic))));
+}
+
+// Endpoints the server may still be pushing to for this topic — the current
+// subscription plus any older one we registered and never cleaned up.
+function pushEndpointsFor(topic) {
+  const endpoints = loadPushRegistrations().filter(r => r.topic === topic).map(r => r.endpoint);
+  const current = state.pushSubscription && state.pushSubscription.endpoint;
+  if (current && !endpoints.includes(current)) endpoints.push(current);
+  return endpoints;
+}
+
+// Deletes the server never acknowledged. A failed unsubscribe is the whole
+// reason push felt impossible to turn off, so it becomes a durable to-do
+// instead of a console.error.
+function loadPendingUnsubs() {
+  return readStoredArray(PUSH_PENDING_UNSUB_KEY);
+}
+
+function savePendingUnsubs(list) {
+  localStorage.setItem(PUSH_PENDING_UNSUB_KEY, JSON.stringify(list));
+}
+
+function sameUnsub(a, b) {
+  return a.endpoint === b.endpoint && (a.topic || null) === (b.topic || null);
+}
+
+function queuePendingUnsub(entry) {
+  const topic = entry.topic || null;
+  // An all-topics delete subsumes the per-topic ones for the same endpoint.
+  const list = topic === null
+    ? loadPendingUnsubs().filter(e => e.endpoint !== entry.endpoint)
+    : loadPendingUnsubs();
+  if (list.some(e => sameUnsub(e, { topic, endpoint: entry.endpoint }))) return;
+  list.push({ topic, endpoint: entry.endpoint });
+  savePendingUnsubs(list);
+}
+
+// Drops queued deletes that are no longer owed. An all-topics entry supersedes
+// the per-topic ones for the same endpoint, and re-subscribing to a topic
+// cancels its pending delete.
+function dropPendingUnsub(entry) {
+  savePendingUnsubs(loadPendingUnsubs().filter(e => !(
+    e.endpoint === entry.endpoint &&
+    (entry.topic == null || e.topic === entry.topic)
+  )));
+}
+
+async function sendPushUnsubscribe(entry) {
+  const path = entry.topic ? `/${entry.topic}/push/subscribe` : '/push/subscribe';
+  await apiFetch(path, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ endpoint: entry.endpoint }),
+  });
+}
+
+// Retries everything owed to the server. Runs at startup and whenever the
+// network comes back, so a disable that happened offline still lands.
+async function flushPendingUnsubs() {
+  const pending = loadPendingUnsubs();
+  if (pending.length === 0) return true;
+
+  let allDone = true;
+  for (const entry of pending) {
+    try {
+      await sendPushUnsubscribe(entry);
+      dropPendingUnsub(entry);
+      forgetPushRegistration(entry.topic, entry.endpoint);
+    } catch (err) {
+      console.error('Retrying push unsubscribe later:', entry, err);
+      allDone = false;
+    }
+  }
+  return allDone;
+}
+
 async function registerPushForTopic(topic, subscription) {
+  // A registration racing a disable would silently re-arm notifications.
+  if (!pushPrefEnabled()) return;
   try {
     await apiFetch(`/${topic}/push/subscribe`, {
       method: 'POST',
@@ -1852,6 +2028,8 @@ async function registerPushForTopic(topic, subscription) {
         },
       }),
     });
+    rememberPushRegistration(topic, subscription.endpoint);
+    dropPendingUnsub({ topic, endpoint: subscription.endpoint });
   } catch (err) {
     console.error(`Push registration failed for topic ${topic}:`, err);
     toastError(`Push notifications couldn't be enabled for ${topic}.`, {
@@ -1859,6 +2037,83 @@ async function registerPushForTopic(topic, subscription) {
       onAction: () => registerPushForTopic(topic, subscription),
     });
   }
+}
+
+// Stops the server pushing this topic to this browser. Called when a topic is
+// unsubscribed — removing the tab used to leave the server row untouched, so
+// notifications kept arriving for a topic no longer in the list.
+async function unregisterPushForTopic(topic, endpoint) {
+  try {
+    await sendPushUnsubscribe({ topic, endpoint });
+    forgetPushRegistration(topic, endpoint);
+    dropPendingUnsub({ topic, endpoint });
+    return true;
+  } catch (err) {
+    console.error(`Push unregistration failed for topic ${topic}:`, err);
+    queuePendingUnsub({ topic, endpoint });
+    return false;
+  }
+}
+
+// Unsubscribe requests in flight, keyed by topic, so an Undo waits for the
+// delete it would otherwise race.
+const pushCleanupInFlight = new Map();
+
+// Clears every endpoint this browser ever registered for a topic — the current
+// subscription plus any the browser rotated away from.
+function cleanUpPushForTopic(topic) {
+  const endpoints = pushEndpointsFor(topic);
+  if (endpoints.length === 0) return Promise.resolve();
+
+  const done = Promise.all(endpoints.map(ep => unregisterPushForTopic(topic, ep)))
+    .then(renderPushState)
+    .finally(() => {
+      if (pushCleanupInFlight.get(topic) === done) pushCleanupInFlight.delete(topic);
+    });
+  pushCleanupInFlight.set(topic, done);
+  return done;
+}
+
+// One request clears the endpoint from every topic, including topics this
+// browser has already forgotten about.
+async function unregisterPushEverywhere(endpoint) {
+  try {
+    await sendPushUnsubscribe({ topic: null, endpoint });
+    forgetPushRegistration(null, endpoint);
+    dropPendingUnsub({ topic: null, endpoint });
+    return true;
+  } catch (err) {
+    console.error('Push unregistration failed:', err);
+    queuePendingUnsub({ topic: null, endpoint });
+    return false;
+  }
+}
+
+// Full teardown, safe to run repeatedly and safe to interrupt. Intent is
+// recorded first: if the tab dies halfway through, the next load resumes the
+// teardown instead of treating the leftover subscription as "still enabled".
+async function teardownPush(subscription) {
+  setPushPref(false);
+  state.pushEnabled = false;
+  state.pushSubscription = null;
+
+  const endpoint = subscription && subscription.endpoint;
+  if (!endpoint) return { serverOk: true, browserOk: true };
+
+  const serverOk = await unregisterPushEverywhere(endpoint);
+
+  let browserOk = true;
+  try {
+    // The decisive step: once the endpoint is gone the push service rejects
+    // further deliveries with 410, which also prunes any server row a failed
+    // DELETE left behind.
+    browserOk = (await subscription.unsubscribe()) !== false;
+  } catch (err) {
+    console.error('pushManager.unsubscribe() failed:', err);
+    browserOk = false;
+  }
+
+  return { serverOk, browserOk };
 }
 
 // Push has three states, not two: not enabled, enabled, and blocked at the OS
@@ -1883,11 +2138,20 @@ function renderPushState() {
     return;
   }
 
-  if (state.pushEnabled) {
+  if (state.pushBusy) {
     enablePushBtn.disabled = true;
-    enablePushBtn.textContent = 'Push Enabled';
+    enablePushBtn.textContent = state.pushEnabled ? 'Disabling…' : 'Enabling…';
+    return;
+  }
+
+  const pendingCleanup = loadPendingUnsubs().length > 0;
+
+  if (state.pushEnabled) {
+    // The button is the off switch, not a status badge — it stays clickable.
+    enablePushBtn.disabled = false;
+    enablePushBtn.textContent = 'Disable Push Notifications';
     enablePushBtn.classList.add('enabled');
-    setPushHint('');
+    setPushHint('Push notifications are on for every subscribed topic.');
     return;
   }
 
@@ -1902,7 +2166,11 @@ function renderPushState() {
   enablePushBtn.disabled = false;
   enablePushBtn.textContent = 'Enable Push Notifications';
   enablePushBtn.classList.remove('enabled');
-  setPushHint('');
+  // Delivery already stopped when the subscription went away; this is only
+  // about the server rows the retry queue is still working through.
+  setPushHint(pendingCleanup
+    ? 'Push is off on this device. Still clearing it on the server — this retries automatically.'
+    : '');
 }
 
 // iOS only exposes Web Push to a PWA installed to the Home Screen.
@@ -1915,14 +2183,12 @@ function isIosSafariNotInstalled() {
 }
 
 // Push notification setup
-enablePushBtn.addEventListener('click', async () => {
-  if (state.pushEnabled) return;
-
-  enablePushBtn.disabled = true;
+async function enablePush() {
+  state.pushBusy = true;
+  renderPushState();
   try {
     const permission = await Notification.requestPermission();
     if (permission !== 'granted') {
-      renderPushState();
       showToast(permission === 'denied'
         ? 'Notifications are blocked. Re-enable them in your browser\'s site settings.'
         : 'Push notifications were not enabled.');
@@ -1939,23 +2205,100 @@ enablePushBtn.addEventListener('click', async () => {
     });
 
     state.pushSubscription = subscription;
+    // Record intent before the first registration, so a registration that
+    // lands after a rapid disable can still be told to stand down.
+    setPushPref(true);
+    state.pushEnabled = true;
 
     // Register subscription for all current topics
     for (const topic of state.topics) {
       await registerPushForTopic(topic, subscription);
     }
 
-    state.pushEnabled = true;
-    renderPushState();
     showToast('Push notifications enabled.', { tone: 'success' });
   } catch (err) {
     console.error('Push subscription failed:', err);
-    renderPushState();
     toastError("Couldn't enable push notifications.", {
       actionLabel: 'Retry',
-      onAction: () => enablePushBtn.click(),
+      onAction: () => enablePush(),
     });
+  } finally {
+    state.pushBusy = false;
+    renderPushState();
   }
+}
+
+async function disablePush() {
+  state.pushBusy = true;
+  renderPushState();
+  try {
+    let subscription = state.pushSubscription;
+    if (!subscription && 'serviceWorker' in navigator) {
+      const reg = await navigator.serviceWorker.ready;
+      subscription = await reg.pushManager.getSubscription();
+    }
+
+    const { serverOk, browserOk } = await teardownPush(subscription);
+
+    if (browserOk && serverOk) {
+      showToast('Push notifications disabled.', { tone: 'success' });
+    } else if (browserOk) {
+      // Delivery has already stopped — the endpoint is gone. The server rows
+      // are cleaned up by the retry queue (or pruned by the 410 on next send).
+      showToast('Push notifications disabled. Finishing server cleanup in the background.');
+    } else {
+      toastError("Couldn't fully turn off push notifications on this device.", {
+        actionLabel: 'Retry',
+        onAction: () => disablePush(),
+      });
+    }
+    announce(browserOk ? 'Push notifications disabled' : 'Push notifications could not be fully disabled');
+  } catch (err) {
+    console.error('Disabling push failed:', err);
+    toastError("Couldn't turn off push notifications.", {
+      actionLabel: 'Retry',
+      onAction: () => disablePush(),
+    });
+  } finally {
+    state.pushBusy = false;
+    renderPushState();
+  }
+}
+
+enablePushBtn.addEventListener('click', () => {
+  if (state.pushBusy) return;
+  if (state.pushEnabled) {
+    disablePush();
+  } else {
+    enablePush();
+  }
+});
+
+// A disable that failed offline is retried as soon as there's a network again.
+window.addEventListener('online', () => {
+  flushPendingUnsubs().then(renderPushState).catch(err => console.error('Unsubscribe retry failed:', err));
+});
+
+// Disabling in one tab has to disable in all of them — a second tab still
+// showing push as on is exactly the kind of thing that makes the setting feel
+// unreliable, and its re-registrations would fight the teardown.
+window.addEventListener('storage', async (e) => {
+  if (e.key !== PUSH_PREF_KEY) return;
+
+  if (!pushPrefEnabled()) {
+    state.pushEnabled = false;
+    state.pushSubscription = null;
+  } else if ('serviceWorker' in navigator) {
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const subscription = await reg.pushManager.getSubscription();
+      state.pushSubscription = subscription;
+      state.pushEnabled = !!subscription;
+    } catch (err) {
+      console.error('Reading push subscription failed:', err);
+    }
+  }
+  renderPushState();
 });
 
 // Helpers

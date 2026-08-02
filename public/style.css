@@ -445,10 +445,16 @@ button {
   padding: 0.45rem 1rem;
 }
 
+/* Push is on. The button is the off switch rather than a status badge, so it
+   keeps normal hover/focus affordances instead of reading as disabled. */
 .push-btn.enabled {
   background: color-mix(in srgb, var(--color-accent-green) 15%, transparent);
   border-color: var(--color-accent-green);
   color: var(--color-accent-green);
+}
+
+.push-btn.enabled:hover {
+  background: color-mix(in srgb, var(--color-accent-green) 28%, transparent);
 }
 
 .topics-header {

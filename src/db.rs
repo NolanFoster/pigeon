@@ -113,6 +113,20 @@ pub async fn delete_push_subscription(
     Ok(())
 }
 
+/// Removes a push endpoint from every topic it was ever registered against.
+/// A client that wants push off can only enumerate the topics it still knows
+/// about — topics dropped earlier (or on another install of the same browser
+/// profile) would keep pushing forever. Deleting by endpoint alone makes
+/// "disable push" a single, complete operation.
+pub async fn delete_push_subscriptions_by_endpoint(
+    db: &D1Database,
+    endpoint: &str,
+) -> Result<()> {
+    let stmt = db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ?1");
+    stmt.bind(&[JsValue::from_str(endpoint)])?.run().await?;
+    Ok(())
+}
+
 /// Internal row type for D1 deserialization
 #[derive(serde::Deserialize)]
 struct MessageRow {

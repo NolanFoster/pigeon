@@ -152,6 +152,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .get_async("/:topic/sse", routes::subscribe::handle)
         .delete_async("/:topic/messages", routes::poll::delete)
         .delete_async("/:topic/messages/:id", routes::poll::delete_one)
+        .delete_async("/push/subscribe", routes::push::unsubscribe_all)
         .post_async("/:topic/push/subscribe", routes::push::subscribe)
         .delete_async("/:topic/push/subscribe", routes::push::unsubscribe)
         .run(req, env)

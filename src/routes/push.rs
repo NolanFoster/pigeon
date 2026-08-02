@@ -47,9 +47,27 @@ pub async fn unsubscribe(mut req: Request, ctx: RouteContext<()>) -> Result<Resp
     validate_topic(&topic)?;
 
     let body: PushUnsubscribeRequest = req.json().await?;
+    if body.endpoint.is_empty() || body.endpoint.len() > 512 {
+        return Response::error("invalid push endpoint", 400);
+    }
 
     let d1 = ctx.d1("DB")?;
     db::delete_push_subscription(&d1, &topic, &body.endpoint).await?;
+
+    Response::ok("unsubscribed")
+}
+
+/// Unregister an endpoint from every topic at once. This is the reliable
+/// off switch: the client doesn't have to still remember which topics it
+/// registered, and one failed request can't leave a topic pushing.
+pub async fn unsubscribe_all(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let body: PushUnsubscribeRequest = req.json().await?;
+    if body.endpoint.is_empty() || body.endpoint.len() > 512 {
+        return Response::error("invalid push endpoint", 400);
+    }
+
+    let d1 = ctx.d1("DB")?;
+    db::delete_push_subscriptions_by_endpoint(&d1, &body.endpoint).await?;
 
     Response::ok("unsubscribed")
 }
