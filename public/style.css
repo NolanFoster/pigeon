@@ -768,12 +768,20 @@ button {
   inset: -16px;
 }
 
-.todo-checkbox:hover:not(:disabled) {
+/* Only an empty box gets the tint. The tick is drawn in the page background
+   colour, so tinting a ticked box hides the tick — which is what the old
+   `:hover:not(:disabled)` rule did the moment completed todos became
+   re-tickable. A ticked box deepens instead. */
+.todo-checkbox:hover:not(:checked) {
   background: color-mix(in srgb, var(--color-accent-green) 15%, transparent);
 }
 
 .todo-checkbox:checked {
   background: var(--color-accent-green);
+}
+
+.todo-checkbox:checked:hover {
+  background: color-mix(in srgb, var(--color-accent-green) 82%, var(--color-text));
 }
 
 .todo-checkbox:checked::after {
@@ -786,10 +794,6 @@ button {
   border: solid var(--color-bg);
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
-}
-
-.todo-checkbox:disabled {
-  cursor: default;
 }
 
 .message-card.is-todo {
@@ -816,12 +820,16 @@ button {
   pointer-events: auto;
 }
 
-.msg-body .md-task-checkbox:hover {
+.msg-body .md-task-checkbox:hover:not(:checked) {
   background: color-mix(in srgb, var(--color-accent-green) 15%, transparent);
 }
 
 .msg-body .md-task-checkbox:checked {
   background: var(--color-accent-green);
+}
+
+.msg-body .md-task-checkbox:checked:hover {
+  background: color-mix(in srgb, var(--color-accent-green) 82%, var(--color-text));
 }
 
 .msg-body .md-task-checkbox:checked::after {

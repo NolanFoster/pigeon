@@ -402,3 +402,88 @@ test('a failed publish reports the error and keeps the composed text', async ({ 
   await expect.poll(() => page.evaluate(() => editor.getMarkdown()))
     .toBe('this should survive');
 });
+
+test('ticking a todo below the top of the list keeps its place and keeps focus', async ({ page, request, baseURL }) => {
+  const topic = `smoke-todo-${Date.now()}`;
+
+  await page.goto('/');
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#subscribe-btn').click();
+  await expect(page.locator('.topic-tab.active')).toContainText(topic);
+
+  // Oldest first, so "Older task" ends up at the bottom of the newest-first list.
+  for (const title of ['Older task', 'Middle task', 'Newest task']) {
+    const res = await request.post(`${baseURL}/${topic}`, {
+      headers: { 'X-Title': title, 'X-Tags': 'todo' },
+      data: `body of ${title}`,
+    });
+    expect(res.ok()).toBeTruthy();
+  }
+  await expect(page.locator('.message-card')).toHaveCount(3);
+
+  // The title element also carries a priority badge, so read just its text node.
+  const titles = () => page.locator('.message-card .msg-title')
+    .evaluateAll(els => els.map(el => el.firstChild.textContent.trim()));
+  expect(await titles()).toEqual(['Newest task', 'Middle task', 'Older task']);
+
+  const middleBox = page.locator('.message-card', { hasText: 'Middle task' }).locator('.todo-checkbox');
+  await middleBox.click();
+
+  // Completed, still second in the list — ticking must not reorder anything.
+  await expect(page.locator('.message-card', { hasText: 'Middle task' })).toHaveClass(/is-done/);
+  expect(await titles()).toEqual(['Newest task', 'Middle task', 'Older task']);
+
+  // The card is rebuilt around the new state; focus has to survive that.
+  await expect.poll(() => page.evaluate(() => {
+    const el = document.activeElement;
+    if (!el || !el.classList.contains('todo-checkbox')) return el ? el.tagName : 'none';
+    return el.closest('.message-card').querySelector('.msg-title').firstChild.textContent.trim();
+  })).toBe('Middle task');
+
+  // A completed todo stays tickable: unticking is the undo for a mis-click.
+  const doneBox = page.locator('.message-card', { hasText: 'Middle task' }).locator('.todo-checkbox');
+  await expect(doneBox).toBeEnabled();
+  await doneBox.click();
+  await expect(page.locator('.message-card', { hasText: 'Middle task' })).not.toHaveClass(/is-done/);
+  expect(await titles()).toEqual(['Newest task', 'Middle task', 'Older task']);
+});
+
+test('ticking a markdown task keeps its message in place and keeps focus', async ({ page, request, baseURL }) => {
+  const topic = `smoke-mdtask-${Date.now()}`;
+
+  await page.goto('/');
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#subscribe-btn').click();
+  await expect(page.locator('.topic-tab.active')).toContainText(topic);
+
+  await request.post(`${baseURL}/${topic}`, {
+    headers: { 'X-Title': 'Checklist', 'X-Markdown': '1' },
+    data: '- [ ] first thing\n- [ ] second thing',
+  });
+  await request.post(`${baseURL}/${topic}`, {
+    headers: { 'X-Title': 'Later note' },
+    data: 'arrived after the checklist',
+  });
+
+  await expect(page.locator('.message-card')).toHaveCount(2);
+  const titles = () => page.locator('.message-card .msg-title')
+    .evaluateAll(els => els.map(el => el.firstChild.textContent.trim()));
+  expect(await titles()).toEqual(['Later note', 'Checklist']);
+
+  // Ticking republishes the message under a new id; it used to reappear at the
+  // top of the list with focus dropped to <body>.
+  await page.locator('.md-task-checkbox').first().click();
+
+  await expect.poll(titles).toEqual(['Later note', 'Checklist']);
+  const checklistCard = page.locator('.message-card:has(.md-task-checkbox)');
+  await expect(checklistCard.locator('.md-task-checkbox').first()).toBeChecked();
+  await expect(page.locator('.message-card')).toHaveCount(2);
+
+  await expect.poll(() => page.evaluate(() => {
+    const el = document.activeElement;
+    return el && el.dataset ? `${el.className}:${el.dataset.taskIndex}` : 'none';
+  })).toBe('md-task-checkbox:0');
+
+  // And the republished card must not replay the entrance animation.
+  await expect(checklistCard).not.toHaveClass(/is-new/);
+});
