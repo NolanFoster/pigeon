@@ -708,6 +708,7 @@ async function connectTopic(topic) {
         }
         const before = state.messages[topic].length;
         state.messages[topic] = state.messages[topic].filter(m => m.id !== msg.id);
+        forgetMessageOrder(msg.id);
         // If the deleted message is currently being edited (locally or by
         // another client), bail out of edit mode so the inline compose form
         // doesn't get orphaned inside a slot that's about to disappear.
@@ -724,11 +725,19 @@ async function connectTopic(topic) {
         return;
       }
       if (state.messages[topic].some(m => m.id === msg.id)) return;
-      state.messages[topic].unshift(msg);
-      announceIncoming(topic, msg);
+      // Before anything renders: an edit echoing back takes the position (and
+      // the focus identity) of the message it replaces instead of the top slot.
+      insertMessage(topic, msg, matchRepublish(topic, msg));
+      // Bookkeeping messages aren't news: the echo of an edit this client just
+      // made, and the marker message that records a todo as complete (whose
+      // body is the id of the todo it completes), are both silent. Announcing
+      // them read a raw uuid out to screen readers.
+      if (!isRepublish(msg.id) && !isTodoMarker(msg)) {
+        announceIncoming(topic, msg);
+      }
       if (state.activeTopic === topic) {
         renderMessages();
-      } else {
+      } else if (!isTodoMarker(msg)) {
         state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + 1;
         renderTopicTabs();
       }
@@ -1022,21 +1031,29 @@ function msgTags(msg) {
 // Todo convention: a message with tags `todo,done` whose body is an existing
 // message id marks that message as complete. doneIds is the set of completed
 // todo ids; markerIds is the set of marker-message ids (so we can clean them
-// up alongside their originals when clearing completed).
+// up alongside their originals when clearing completed); markersFor maps a
+// completed todo to the markers claiming it, which is how un-ticking works —
+// deleting the markers restores the todo to open.
 function getDoneTodoIds(allMsgs) {
   const doneIds = new Set();
   const markerIds = new Set();
+  const markersFor = new Map();
   for (const m of allMsgs) {
-    const tags = msgTags(m);
-    if (tags.includes('todo') && tags.includes('done')) {
-      const ref = (m.message || '').trim();
-      if (ref) {
-        doneIds.add(ref);
-        markerIds.add(m.id);
-      }
-    }
+    if (!isTodoMarker(m)) continue;
+    const ref = (m.message || '').trim();
+    if (!ref) continue;
+    doneIds.add(ref);
+    markerIds.add(m.id);
+    const existing = markersFor.get(ref);
+    if (existing) existing.push(m.id);
+    else markersFor.set(ref, [m.id]);
   }
-  return { doneIds, markerIds };
+  return { doneIds, markerIds, markersFor };
+}
+
+function isTodoMarker(msg) {
+  const tags = msgTags(msg);
+  return tags.includes('todo') && tags.includes('done');
 }
 
 // --- Static, developer-authored icon markup -------------------------------
@@ -1077,6 +1094,185 @@ let emptyStateSig = null;
 // history or switching topics doesn't animate the whole list.
 function markMessagesSeen(topic) {
   for (const m of state.messages[topic] || []) animatedIds.add(m.id);
+}
+
+// ---------------------------------------------------------------------------
+// Stable list order across an edit
+//
+// Editing a message — a full save, or ticking one `- [ ]` box in its body — is
+// implemented as publish-new + delete-old, so the message comes back from the
+// server with a fresh id and a fresh created_at. In a newest-first list that
+// sent the row straight to the top: tick a task halfway down and it vanished
+// from under the pointer, taking keyboard focus with it. An edit is not a new
+// arrival, so a republished message inherits the sort position of the message
+// it replaces and stays exactly where the user left it.
+// ---------------------------------------------------------------------------
+
+const messageOrder = new Map();     // message id -> inherited sort key
+const republishedFrom = new Map();  // replaced id -> replacement id
+// Aliases outlive the message they point away from (focus has to follow an id
+// across the delete that retires it), so they're bounded rather than cleaned up
+// on delete. Only the most recent edits can still be holding focus.
+const MAX_ALIASES = 50;
+
+function orderKey(msg) {
+  const inherited = messageOrder.get(msg.id);
+  return inherited === undefined ? msg.created_at : inherited;
+}
+
+// The sort key a message currently occupies. Read *before* republishing, since
+// the original is deleted as part of the round trip.
+function orderKeyForId(topic, id) {
+  const inherited = messageOrder.get(id);
+  if (inherited !== undefined) return inherited;
+  const msg = (state.messages[topic] || []).find(m => m.id === id);
+  return msg ? msg.created_at : null;
+}
+
+// Hands `newId` the list position (and the identity, for focus purposes) of the
+// message it replaces.
+function inheritPosition(oldId, newId, key) {
+  if (!newId) return;
+  if (key != null) messageOrder.set(newId, key);
+  if (oldId) {
+    republishedFrom.set(oldId, newId);
+    while (republishedFrom.size > MAX_ALIASES) {
+      republishedFrom.delete(republishedFrom.keys().next().value);
+    }
+  }
+  // A republish is not an arrival: no entrance animation, no announcement.
+  animatedIds.add(newId);
+}
+
+// The server broadcasts a published message over the WebSocket before it
+// answers the POST, so the replacement is usually already on screen by the time
+// the publish call resolves — too late to place it. Instead we describe what we
+// are about to publish and recognise the echo by its content when it arrives.
+const pendingRepublish = new Map();  // content signature -> { oldId, key }
+const REPUBLISH_TTL = 60000;
+
+function republishSignature(topic, fields) {
+  return JSON.stringify([
+    topic,
+    fields.title || '',
+    fields.tags || '',
+    fields.message == null ? '' : String(fields.message),
+  ]);
+}
+
+// Returns a cancel function for the caller to run if the publish never happens.
+function expectRepublish(topic, oldId, key, fields) {
+  if (key == null) return () => {};
+  const sig = republishSignature(topic, fields);
+  const entry = { oldId, key };
+  pendingRepublish.set(sig, entry);
+  const drop = () => {
+    if (pendingRepublish.get(sig) === entry) pendingRepublish.delete(sig);
+  };
+  // A publish whose echo never arrives (socket dropped mid-flight) must not
+  // leave an entry behind that later mistakes an unrelated message for an edit.
+  setTimeout(drop, REPUBLISH_TTL);
+  return drop;
+}
+
+// Recognises an incoming message as the echo of an edit this client made and
+// gives it the replaced message's slot. Returns the match, or null.
+function matchRepublish(topic, msg) {
+  const sig = republishSignature(topic, msg);
+  const pending = pendingRepublish.get(sig);
+  if (!pending) return null;
+  pendingRepublish.delete(sig);
+  inheritPosition(pending.oldId, msg.id, pending.key);
+  return pending;
+}
+
+// New messages go to the head of the newest-first list; a republished one goes
+// exactly where its predecessor sits. Sort keys are whole seconds, so several
+// messages routinely tie — array position, which the stable sort in
+// renderMessages preserves, is what actually pins an edit in place.
+function insertMessage(topic, msg, replaced) {
+  const list = state.messages[topic];
+  const anchor = replaced ? list.findIndex(m => m.id === replaced.oldId) : -1;
+  if (anchor >= 0) list.splice(anchor, 0, msg);
+  else list.unshift(msg);
+}
+
+// Follows an id forward through however many republishes have retired it, so a
+// control can be found again after several rapid edits.
+function currentIdFor(id) {
+  let cur = id;
+  for (let hops = 0; hops < MAX_ALIASES && republishedFrom.has(cur); hops++) {
+    cur = republishedFrom.get(cur);
+  }
+  return cur;
+}
+
+// True for a message the client itself just republished, so the WS echo of it
+// isn't announced to screen readers as a new incoming message.
+function isRepublish(id) {
+  return messageOrder.has(id);
+}
+
+function forgetMessageOrder(id) {
+  messageOrder.delete(id);
+}
+
+// ---------------------------------------------------------------------------
+// Focus preservation across a re-render
+//
+// A card is rebuilt whenever its content changes, and a republish changes its
+// message id as well — so the control the user is operating gets removed
+// mid-render and focus silently drops to <body>. That restarts keyboard and
+// screen-reader navigation from the top of the document. We describe the
+// focused control before the reconcile and re-acquire the equivalent control
+// afterwards (WCAG 2.4.3 focus order / 3.2.2 on input).
+// ---------------------------------------------------------------------------
+
+function cssValue(str) {
+  return typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(str) : str;
+}
+
+function captureFocus() {
+  const el = document.activeElement;
+  if (!el || el === document.body || !messagesList.contains(el)) return null;
+  // Only [data-action] controls are re-creatable from a description; anything
+  // else in the list (the transplanted compose editor) is moved, not rebuilt.
+  const action = el.dataset && el.dataset.action;
+  if (!action) return null;
+  return {
+    el,
+    action,
+    msgId: el.dataset.msgId || '',
+    taskIndex: el.dataset.taskIndex || '',
+  };
+}
+
+function restoreFocus(saved) {
+  if (!saved || saved.el.isConnected) return;
+  // Only step in for focus this render dropped — never steal it from wherever
+  // it legitimately moved to.
+  const active = document.activeElement;
+  if (active && active !== document.body) return;
+
+  const msgId = currentIdFor(saved.msgId);
+  let selector = `[data-action="${cssValue(saved.action)}"]`;
+  if (msgId) selector += `[data-msg-id="${cssValue(msgId)}"]`;
+  if (saved.taskIndex) selector += `[data-task-index="${cssValue(saved.taskIndex)}"]`;
+
+  const next = messagesList.querySelector(selector);
+  // preventScroll: the control is back in the same place, so the browser's
+  // scroll-into-view would only ever jolt the list.
+  if (next) {
+    next.focus({ preventScroll: true });
+    return;
+  }
+  // The control is genuinely gone (its message was deleted). Land focus on the
+  // card it belonged to so the user keeps their place in the list.
+  const card = msgId && messagesList.querySelector(`.message-card[data-msg-id="${cssValue(msgId)}"]`);
+  if (card) {
+    card.tabIndex = -1;
+    card.focus({ preventScroll: true });
+  }
 }
 
 // Places `desired` as the exact child list of `parent`, moving existing nodes
@@ -1190,13 +1386,15 @@ function buildCard(msg, ctx) {
     cb.type = 'checkbox';
     cb.className = 'todo-checkbox';
     cb.checked = ctx.isDone;
-    cb.disabled = ctx.isDone;
+    // A completed todo stays tickable. Disabling it stranded keyboard focus on
+    // a dead control and left an accidental tick with no way back other than
+    // deleting the task outright; unticking is the expected undo.
     cb.dataset.action = 'toggle-todo';
     cb.dataset.msgId = msg.id;
     cb.dataset.topic = msg.topic;
     cb.dataset.done = ctx.isDone ? '1' : '0';
     cb.setAttribute('aria-label',
-      ctx.isDone ? `Completed: ${titleText}` : `Mark "${titleText}" complete`);
+      ctx.isDone ? `Mark "${titleText}" not complete` : `Mark "${titleText}" complete`);
     left.appendChild(cb);
   }
 
@@ -1265,6 +1463,11 @@ function getCard(msg, ctx) {
   const cached = messageEls.get(msg.id);
   if (cached && cached.dataset.sig === sig) {
     cached.hidden = ctx.editingThis;
+    // A click flips `checked` in the DOM before the server has confirmed it.
+    // Re-assert the stored state so a failed round trip visibly rolls back
+    // instead of leaving a tick the server never recorded.
+    const cb = cached.querySelector('.todo-checkbox');
+    if (cb && cb.checked !== ctx.isDone) cb.checked = ctx.isDone;
     return cached;
   }
   const card = buildCard(msg, ctx);
@@ -1383,6 +1586,7 @@ function getEmptyState(kind, topic) {
 function renderMessages() {
   const topic = state.activeTopic;
   const desired = [];
+  const savedFocus = captureFocus();
 
   if (!topic) {
     messageEls.clear();
@@ -1397,10 +1601,12 @@ function renderMessages() {
   const { doneIds } = getDoneTodoIds(allMsgs);
   if (clearCompletedBtn) clearCompletedBtn.hidden = doneIds.size === 0;
 
-  let msgs = allMsgs.filter(m => {
-    const tags = msgTags(m);
-    return !(tags.includes('todo') && tags.includes('done'));
-  });
+  // Newest first, except that an edited message keeps the position of the one
+  // it replaced. Array.sort is stable, so messages sharing a timestamp (the
+  // server records whole seconds) keep their arrival order.
+  let msgs = allMsgs.slice()
+    .sort((a, b) => orderKey(b) - orderKey(a))
+    .filter(m => !isTodoMarker(m));
 
   // Every tag present in the topic, offered as quick filters.
   const uniqueTags = Array.from(new Set(msgs.flatMap(m => msgTags(m)))).sort();
@@ -1437,6 +1643,7 @@ function renderMessages() {
 
   reconcileChildren(messagesList, desired);
   placeCompose();
+  restoreFocus(savedFocus);
   if (!state.editing) composeSlots.clear();
 }
 
@@ -1469,7 +1676,10 @@ function clearFilterTag() {
 }
 
 async function toggleTodo(id, topic, done) {
-  if (done) return;
+  if (done) {
+    await uncompleteTodo(id, topic);
+    return;
+  }
   try {
     if (isE2eeTopic(topic)) {
       const key = state.topicKeys[topic];
@@ -1492,13 +1702,16 @@ async function toggleTodo(id, topic, done) {
         },
         body: envelope,
       });
-      return;
+    } else {
+      await apiFetch(`/${topic}`, {
+        method: 'POST',
+        headers: { 'X-Tags': 'todo,done' },
+        body: id,
+      });
     }
-    await apiFetch(`/${topic}`, {
-      method: 'POST',
-      headers: { 'X-Tags': 'todo,done' },
-      body: id,
-    });
+    // The tick itself is silent to a screen reader — the checkbox state change
+    // isn't announced when the card is rebuilt underneath it.
+    announce(`${todoLabel(topic, id)} marked complete.`);
   } catch (err) {
     console.error('toggleTodo failed:', err);
     toastError("Couldn't mark that task complete.", {
@@ -1509,6 +1722,37 @@ async function toggleTodo(id, topic, done) {
     // state back from the message stream.
     renderMessages();
   }
+}
+
+// Un-tick a completed todo by deleting the marker message(s) that claim it.
+// The task itself is untouched — this is the undo for an accidental tick, not
+// a delete.
+async function uncompleteTodo(id, topic) {
+  const markers = getDoneTodoIds(state.messages[topic] || []).markersFor.get(id) || [];
+  if (markers.length === 0) {
+    renderMessages();
+    return;
+  }
+  try {
+    for (const markerId of markers) {
+      await apiFetch(`/${topic}/messages/${markerId}`, { method: 'DELETE' });
+    }
+    announce(`${todoLabel(topic, id)} marked not complete.`);
+  } catch (err) {
+    console.error('uncompleteTodo failed:', err);
+    toastError("Couldn't reopen that task.", {
+      actionLabel: 'Retry',
+      onAction: () => uncompleteTodo(id, topic),
+    });
+    // Put the tick back — the task is still complete on the server.
+    renderMessages();
+  }
+}
+
+function todoLabel(topic, id) {
+  const msg = (state.messages[topic] || []).find(m => m.id === id);
+  const label = msg && (msg.title || msg.message);
+  return label ? `"${String(label).slice(0, 60)}"` : 'Task';
 }
 
 // Toggle the Nth `- [ ]` task in a markdown todo body. Mirrors the edit
@@ -1526,9 +1770,11 @@ async function toggleMarkdownTask(msgId, index) {
   let count = 0;
   let match;
   let newBody = null;
+  let nowChecked = false;
   while ((match = re.exec(msg.message)) !== null) {
     if (count === index) {
-      const replacement = match[1] + (match[2] === ' ' ? '[x]' : '[ ]');
+      nowChecked = match[2] === ' ';
+      const replacement = match[1] + (nowChecked ? '[x]' : '[ ]');
       newBody = msg.message.slice(0, match.index) + replacement + msg.message.slice(match.index + match[0].length);
       break;
     }
@@ -1545,9 +1791,20 @@ async function toggleMarkdownTask(msgId, index) {
   }
 
   const previousBody = msg.message;
+  // Read the position now: the republished copy has to land here, not at the
+  // top of the list, so the row the user just clicked stays put.
+  const position = orderKeyForId(topic, msg.id);
   msg._toggling = true;
   msg.message = newBody;
   renderMessages();
+
+  // Registered before the publish, because the server broadcasts the new
+  // message over the WebSocket before it answers the POST.
+  const cancelRepublish = expectRepublish(topic, msg.id, position, {
+    title: msg.title || '',
+    tags: msg.tags || '',
+    message: newBody,
+  });
 
   try {
     // Publish the updated message *before* deleting the original. The old
@@ -1578,8 +1835,10 @@ async function toggleMarkdownTask(msgId, index) {
       await apiFetch(`/${topic}`, { method: 'POST', headers, body: newBody });
     }
     await apiFetch(`/${topic}/messages/${msg.id}`, { method: 'DELETE' });
+    announce(`Task ${index + 1} marked ${nowChecked ? 'complete' : 'not complete'}.`);
   } catch (err) {
     console.error('toggleMarkdownTask failed:', err);
+    cancelRepublish();
     // Roll the optimistic edit back so the checkbox matches what's stored.
     msg.message = previousBody;
     renderMessages();
@@ -1709,6 +1968,13 @@ async function sendMessage() {
   const priority = composePriority ? composePriority.value : '3';
 
   const editing = state.editing;
+  // Saving an edit republishes the message under a new id; read the position it
+  // holds now, before the delete below retires it, so the saved copy stays put
+  // in the list rather than jumping to the top.
+  const position = editing ? orderKeyForId(editing.topic, editing.id) : null;
+  const cancelRepublish = editing
+    ? expectRepublish(editing.topic, editing.id, position, { title, tags, message: body })
+    : () => {};
 
   sendBtn.disabled = true;
   try {
@@ -1716,6 +1982,7 @@ async function sendMessage() {
       const key = state.topicKeys[topic];
       if (!key) {
         toastError('No passphrase loaded for this topic, so the message can\'t be encrypted.');
+        cancelRepublish();
         return;
       }
       if (editing) {
@@ -1762,6 +2029,7 @@ async function sendMessage() {
     announce(editing ? 'Message saved' : 'Message sent');
   } catch (err) {
     console.error('Send failed:', err);
+    cancelRepublish();
     // Leave the composed text in place so a retry doesn't mean retyping it.
     toastError(
       editing ? "Couldn't save your changes." : "Couldn't send your message.",

@@ -68,7 +68,9 @@ Any topic can act as a todo list — no special endpoint, just a tag convention.
 curl -H "X-Tags: todo" -d "Buy milk" https://your-worker.dev/groceries
 ```
 
-Checking the box publishes a `todo,done` message whose body is the original message's id. Completion state is computed by the UI from the message stream; nothing extra is stored. Mixed topics work too — non-`todo` messages render normally alongside checklist items.
+Checking the box publishes a `todo,done` message whose body is the original message's id. Unchecking deletes that marker again, so an accidental tick is undoable without touching the task itself. Completion state is computed by the UI from the message stream; nothing extra is stored. Mixed topics work too — non-`todo` messages render normally alongside checklist items.
+
+Ticking a task never reorders the list. That matters because an edit — including ticking a `- [ ]` box inside a markdown body — republishes the message under a new id and timestamp; the UI keeps the replacement in the position of the message it replaced, and returns keyboard focus to the checkbox that was clicked.
 
 ### Editing messages
 
