@@ -57,8 +57,32 @@ curl -H "X-Markdown: 1" \
 | `DELETE` | `/:topic/messages` | Delete all messages for a topic |
 | `DELETE` | `/:topic/messages/:id` | Delete a single message |
 | `POST` | `/:topic/push/subscribe` | Register Web Push subscription |
-| `DELETE` | `/:topic/push/subscribe` | Unregister Web Push subscription |
+| `DELETE` | `/:topic/push/subscribe` | Unregister Web Push subscription for one topic |
+| `DELETE` | `/push/subscribe` | Unregister a push endpoint from **every** topic |
 | `GET` | `/vapid-key` | Get VAPID public key for push setup |
+
+Both unsubscribe endpoints take `{"endpoint": "https://…"}` as the body.
+
+### Turning push notifications off
+
+The button in the topics header is a toggle, not a status badge — press it again
+to turn push off. Disabling does three things, and each one is enough on its own
+to stop notifications:
+
+- `DELETE /push/subscribe` clears the endpoint from every topic server-side, so
+  topics this browser has already forgotten about are covered too.
+- The browser's `PushSubscription` is revoked, which makes the push service
+  reject any later delivery with `410 Gone` — the worker prunes those rows when
+  it sees them.
+- The choice is stored locally, so a reload doesn't re-register anything. If the
+  browser still holds a subscription while push is off (a teardown interrupted
+  by a closed tab), the next load finishes tearing it down instead of treating
+  it as "still enabled".
+
+If the server can't be reached, the delete is queued and retried on the next
+load and whenever the network comes back; the button reports that cleanup is
+still pending. Unsubscribing from a single topic unregisters push for that topic
+the same way.
 
 ### Todo lists
 
@@ -101,10 +125,10 @@ Each message card has an edit (pencil) button. Editing pre-fills the compose box
 
    Update `database_id` in `wrangler.toml` with the ID from the output.
 
-3. **Run the migration:**
+3. **Run the migrations:**
 
    ```bash
-   npx wrangler d1 execute pigeon-db --remote --file=migrations/0001_initial.sql
+   npx wrangler d1 migrations apply DB --remote
    ```
 
 4. **Generate VAPID keys:**
@@ -182,6 +206,10 @@ Frontend hardening:
 - `/:topic/push/subscribe` rejects endpoints that aren't on a recognized push
   service (FCM, Mozilla autopush, WNS, Apple APNs) to prevent the worker from
   becoming a generic HTTP-POST amplifier.
+- The unsubscribe endpoints delete by push endpoint URL, which is itself an
+  unguessable capability URL issued by the push service. Anyone holding it can
+  already impersonate that subscriber, so being able to unregister it grants
+  nothing new — and making "off" work without an account is worth more.
 
 ## License
 
