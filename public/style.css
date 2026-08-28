@@ -272,6 +272,19 @@ code, pre {
   margin-bottom: 1.25rem;
 }
 
+.dialog-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 44px;
+  margin: -0.5rem 0 1.25rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: inherit;
+}
+
 .app-dialog-actions {
   display: flex;
   justify-content: flex-end;
