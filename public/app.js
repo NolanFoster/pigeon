@@ -749,7 +749,7 @@ async function connectTopic(topic) {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   let ws;
   try {
-    ws = new WebSocket(`${proto}//${location.host}/${topic}/sse`);
+    ws = new WebSocket(`${proto}//${location.host}/${topic}/sse?since=all`);
   } catch (err) {
     state.connectingTopics.delete(topic);
     setOfflineHistoryNotice(topic, (state.messages[topic] || []).length
