@@ -798,13 +798,12 @@ async function connectTopic(topic) {
         renderTopicTabs();
       }
 
-      // A publisher can POST immediately after the subscribe UI becomes
-      // visible, before the socket has finished its upgrade. If both that
-      // broadcast and this first D1 read land in the gap, retry an empty
-      // initial read once. Merge rather than replace so a live arrival cannot
-      // be lost while this catch-up request is in flight.
+      // A publisher can POST immediately after the subscribe UI becomes,
+      // before its socket upgrade or the first D1 read has completed. Retry an
+      // empty initial read for a short, bounded period and merge results so a
+      // delayed read can never overwrite a message received live.
       if (state.messages[topic].length === 0 && earlyMessages.length === 0) {
-        setTimeout(async () => {
+        const recoverMissedInitialHistory = async (attempt = 0) => {
           if (!state.topics.includes(topic) || state.messages[topic].length !== 0) return;
           try {
             const retry = await fetch(`/${topic}/json?since=all`);
@@ -825,11 +824,16 @@ async function connectTopic(topic) {
                 state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + recovered;
                 renderTopicTabs();
               }
+            } else if (attempt < 4 && state.messages[topic].length === 0) {
+              // D1 visibility and the WebSocket upgrade can each trail the
+              // publish response. Back off, but stop after about four seconds.
+              setTimeout(() => recoverMissedInitialHistory(attempt + 1), 250 * (2 ** attempt));
             }
           } catch (retryErr) {
             console.warn(`Retrying initial history for ${topic} failed:`, retryErr);
           }
-        }, 250);
+        };
+        setTimeout(recoverMissedInitialHistory, 250);
       }
     } catch (err) {
       // Only use the cache when server history is unavailable. A late IndexedDB
