@@ -1,12 +1,13 @@
 /* global PigeonCrypto, PigeonKeystore */
 importScripts('/keystore.js', '/crypto.js');
 
-const CACHE_NAME = 'pigeon-v6';
+const CACHE_NAME = 'pigeon-v7';
 // The editor bundle, its stylesheets and the icons were previously missing, so
 // an offline launch rendered without a compose box.
 const STATIC_ASSETS = [
-  '/', '/style.css', '/app.js', '/crypto.js', '/keystore.js', '/manifest.json',
-  '/badge.png', '/favicon.png', '/icon-192.png', '/icon-512.png', '/logo.png',
+  '/', '/index.html', '/style.css', '/app.js', '/crypto.js', '/keystore.js', '/manifest.json',
+  '/badge.png', '/favicon.png', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png',
+  '/icon-maskable-192.png', '/icon-maskable-512.png', '/logo.png',
   '/vendor/marked.min.js', '/vendor/purify.min.js', '/vendor/Sortable.min.js',
   '/vendor/toastui-editor-all.min.js',
   '/vendor/toastui-editor.min.css', '/vendor/toastui-editor-dark.min.css',
