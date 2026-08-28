@@ -797,6 +797,40 @@ async function connectTopic(topic) {
         state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + newEarly;
         renderTopicTabs();
       }
+
+      // A publisher can POST immediately after the subscribe UI becomes
+      // visible, before the socket has finished its upgrade. If both that
+      // broadcast and this first D1 read land in the gap, retry an empty
+      // initial read once. Merge rather than replace so a live arrival cannot
+      // be lost while this catch-up request is in flight.
+      if (state.messages[topic].length === 0 && earlyMessages.length === 0) {
+        setTimeout(async () => {
+          if (!state.topics.includes(topic) || state.messages[topic].length !== 0) return;
+          try {
+            const retry = await fetch(`/${topic}/json?since=all`);
+            if (!retry.ok) return;
+            const missed = await retry.json();
+            await Promise.all(missed.map(m => tryDecryptMessage(topic, m)));
+            let recovered = 0;
+            for (const msg of missed.reverse()) {
+              if (!state.messages[topic].some(m => m.id === msg.id)) {
+                insertMessage(topic, msg);
+                recovered++;
+              }
+            }
+            if (recovered > 0) {
+              await cacheTopicMessages(topic);
+              if (state.activeTopic === topic) renderMessages();
+              else {
+                state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + recovered;
+                renderTopicTabs();
+              }
+            }
+          } catch (retryErr) {
+            console.warn(`Retrying initial history for ${topic} failed:`, retryErr);
+          }
+        }, 250);
+      }
     } catch (err) {
       // Only use the cache when server history is unavailable. A late IndexedDB
       // read must never replace newer messages received from the server.
