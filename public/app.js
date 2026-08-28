@@ -178,17 +178,15 @@ function cacheTopicMessages(topic) {
     .catch(err => console.warn(`Couldn't cache messages for ${topic}:`, err));
 }
 
-async function restoreCachedMessages(topic) {
+async function getCachedMessages(topic) {
   try {
     const cached = await PigeonKeystore.getTopicMessages(topic);
-    if (!Array.isArray(cached) || cached.length === 0) return false;
+    if (!Array.isArray(cached) || cached.length === 0) return [];
     await Promise.all(cached.map(msg => tryDecryptMessage(topic, msg)));
-    state.messages[topic] = cached;
-    markMessagesSeen(topic);
-    return true;
+    return cached;
   } catch (err) {
     console.warn(`Couldn't restore cached messages for ${topic}:`, err);
-    return false;
+    return [];
   }
 }
 
@@ -505,6 +503,12 @@ function initTopicSortable() {
 
 // Initialize
 async function init() {
+  // Handle launch actions before asynchronous PWA setup. This makes a
+  // subscribe shortcut immediately ready for input even while the service
+  // worker is being installed or updated.
+  const launchAction = new URLSearchParams(location.search).get('action');
+  if (launchAction === 'subscribe') topicInput.focus();
+
   // Push cleanup that shouldn't hold up the rest of startup, but has to run in
   // order: a resumed teardown may queue work that the retry pass then picks up.
   let pushStartup = Promise.resolve();
@@ -551,8 +555,6 @@ async function init() {
     selectTopic(state.topics[0]);
   }
 
-  const launchAction = new URLSearchParams(location.search).get('action');
-  if (launchAction === 'subscribe') topicInput.focus();
   if (launchAction === 'compose' && state.activeTopic) {
     document.getElementById('compose-title').focus();
   }
@@ -739,17 +741,10 @@ async function shareActiveTopic() {
 async function connectTopic(topic) {
   if (state.eventSources[topic] || state.connectingTopics.has(topic)) return;
   state.connectingTopics.add(topic);
-  const restored = await restoreCachedMessages(topic);
-  // A topic may have been removed while its IDB read was in flight.
-  if (!state.topics.includes(topic)) {
-    state.connectingTopics.delete(topic);
-    return;
-  }
-  if (restored && navigator.onLine === false) {
-    setOfflineHistoryNotice(topic, 'Offline — showing cached messages.');
-    if (state.activeTopic === topic) renderMessages();
-  }
   state.messages[topic] = state.messages[topic] || [];
+  // Do not await IndexedDB before opening the live connection: publishing
+  // immediately after subscribing must not race a delayed cache read.
+  const cachedMessages = getCachedMessages(topic);
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   let ws;
@@ -803,6 +798,13 @@ async function connectTopic(topic) {
         renderTopicTabs();
       }
     } catch (err) {
+      // Only use the cache when server history is unavailable. A late IndexedDB
+      // read must never replace newer messages received from the server.
+      const cached = await cachedMessages;
+      if (state.topics.includes(topic) && cached.length > 0) {
+        state.messages[topic] = cached;
+        markMessagesSeen(topic);
+      }
       historyLoaded = true;
       setOfflineHistoryNotice(topic, (state.messages[topic] || []).length
         ? 'Offline — showing cached messages.'
