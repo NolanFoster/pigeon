@@ -27,6 +27,9 @@ const TOASTUI_EDITOR_DARK_CSS: &str =
     include_str!("../public/vendor/toastui-editor-dark.min.css");
 const ICON_192: &[u8] = include_bytes!("../public/icon-192.png");
 const ICON_512: &[u8] = include_bytes!("../public/icon-512.png");
+const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../public/apple-touch-icon.png");
+const ICON_MASKABLE_192: &[u8] = include_bytes!("../public/icon-maskable-192.png");
+const ICON_MASKABLE_512: &[u8] = include_bytes!("../public/icon-maskable-512.png");
 const SCREENSHOT_WIDE: &[u8] = include_bytes!("../public/screenshot-wide.png");
 const SCREENSHOT_NARROW: &[u8] = include_bytes!("../public/screenshot-narrow.png");
 const FAVICON: &[u8] = include_bytes!("../public/favicon.png");
@@ -118,11 +121,24 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         "/vendor/toastui-editor-dark.min.css" => {
             return serve_static(TOASTUI_EDITOR_DARK_CSS, "text/css; charset=utf-8")
         }
-        "/favicon.ico" | "/favicon.png" | "/icon-192.png" | "/icon-512.png" | "/screenshot-wide.png" | "/screenshot-narrow.png" | "/logo.png" | "/badge.png" => {
+        "/favicon.ico"
+        | "/favicon.png"
+        | "/apple-touch-icon.png"
+        | "/icon-192.png"
+        | "/icon-512.png"
+        | "/icon-maskable-192.png"
+        | "/icon-maskable-512.png"
+        | "/screenshot-wide.png"
+        | "/screenshot-narrow.png"
+        | "/logo.png"
+        | "/badge.png" => {
             let data = match path.as_str() {
                 "/favicon.ico" | "/favicon.png" => FAVICON,
                 "/icon-192.png" => ICON_192,
                 "/icon-512.png" => ICON_512,
+                "/apple-touch-icon.png" => APPLE_TOUCH_ICON,
+                "/icon-maskable-192.png" => ICON_MASKABLE_192,
+                "/icon-maskable-512.png" => ICON_MASKABLE_512,
                 "/screenshot-wide.png" => SCREENSHOT_WIDE,
                 "/screenshot-narrow.png" => SCREENSHOT_NARROW,
                 "/logo.png" => LOGO,
