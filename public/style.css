@@ -1176,9 +1176,9 @@ button {
   pointer-events: none;
 }
 
-.compose-tags-input {
+.compose .compose-tags-input {
   width: 100%;
-  padding-left: 1.75rem !important;
+  padding-left: 1.75rem;
 }
 
 .compose-actions {
