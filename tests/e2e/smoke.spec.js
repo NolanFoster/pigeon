@@ -50,6 +50,7 @@ test('message images reserve layout space and use their title as alt text', asyn
   await page.goto('/');
   await page.locator('#topic-input').fill(topic);
   await page.locator('#subscribe-btn').click();
+  await expect(page.locator('.topic-tab.active')).toContainText(topic);
 
   const res = await request.post(`${baseURL}/${topic}`, {
     headers: { 'X-Title': title, 'X-Image': 'https://example.com/wildflowers.jpg' },
@@ -57,6 +58,9 @@ test('message images reserve layout space and use their title as alt text', asyn
   });
   expect(res.ok()).toBeTruthy();
 
+  // Realtime delivery (WS upgrade + history fetch + bounded retry) can take a
+  // few seconds; wait for the message to land before asserting its image.
+  await expect(page.locator('.message-card')).toHaveCount(1, { timeout: 15_000 });
   const image = page.locator('.message-card .msg-image img');
   await expect(image).toHaveAttribute('alt', title);
   await expect(image).toHaveCSS('aspect-ratio', '16 / 9');
@@ -195,7 +199,7 @@ test('multi-tag filtering is AND-ed, per-topic, and reflected in the URL', async
   await expect(page.locator('.message-card .msg-title')).toContainText('Both');
 
   // The filter is mirrored in the URL query string.
-  await expect.poll(() => page.url()).toContain('tags=alpha,beta');
+  await expect.poll(() => new URL(page.url()).searchParams.get('tags')).toBe('alpha,beta');
 
   // Reload restores the same filtered view.
   await page.reload();
