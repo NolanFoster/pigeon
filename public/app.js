@@ -122,6 +122,7 @@ async function tryDecryptMessage(topic, msg) {
     if (typeof fields.image === 'string') msg.image = fields.image;
     if (typeof fields.markdown === 'boolean') msg.markdown = fields.markdown;
     msg._decrypted = true;
+    delete msg._locked;
   } catch (err) {
     console.warn('Decrypt failed for message', msg.id, err);
     msg._locked = true;
@@ -147,6 +148,9 @@ const liveRegion = document.getElementById('live-region');
 const toastRegion = document.getElementById('toast-region');
 const appDialog = document.getElementById('app-dialog');
 const connectionStatusEl = document.getElementById('connection-status');
+const unlockDialog = document.getElementById('unlock-dialog');
+const unlockForm = document.getElementById('unlock-form');
+const unlockPassphrase = document.getElementById('unlock-passphrase');
 
 // ---------------------------------------------------------------------------
 // Feedback primitives
@@ -360,6 +364,16 @@ document.addEventListener('click', (e) => {
     case 'edit-msg': {
       const id = target.getAttribute('data-msg-id');
       if (id) editMessage(id);
+      break;
+    }
+    case 'delete-msg': {
+      const id = target.getAttribute('data-msg-id');
+      if (id) requestDeleteMessage(id);
+      break;
+    }
+    case 'unlock-topic': {
+      const topic = target.getAttribute('data-topic');
+      if (topic) requestTopicUnlock(topic);
       break;
     }
     case 'copy-msg': {
@@ -1095,6 +1109,7 @@ const PRIORITY_ICONS = {
 const PRIORITY_NAMES = { 5: 'critical', 4: 'high', 3: 'normal', 2: 'low', 1: 'info' };
 const COPY_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
 const EDIT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path></svg>';
+const DELETE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14H6L5 6m3 0V4h8v2m-6 5v6m4-6v6"></path></svg>';
 const CHECK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
 
 // ---------------------------------------------------------------------------
@@ -1403,11 +1418,19 @@ function buildCard(msg, ctx) {
     const body = document.createElement('div');
     body.className = 'msg-body locked-body';
     body.textContent = 'Enter the topic passphrase to decrypt this message.';
+    const unlock = document.createElement('button');
+    unlock.type = 'button';
+    unlock.className = 'btn btn-secondary unlock-btn';
+    unlock.dataset.action = 'unlock-topic';
+    unlock.dataset.topic = msg.topic;
+    unlock.textContent = 'Unlock';
+    body.appendChild(document.createTextNode(' '));
+    body.appendChild(unlock);
     card.append(header, body);
     return card;
   }
 
-  const titleText = msg.title || msg.topic || '';
+  const titleText = msg.title || '';
   if (ctx.isTodo) card.classList.add('is-todo');
   if (ctx.isDone) card.classList.add('is-done');
 
@@ -1428,14 +1451,20 @@ function buildCard(msg, ctx) {
     left.appendChild(cb);
   }
 
-  const title = document.createElement('h3');
-  title.className = 'msg-title';
-  title.appendChild(document.createTextNode(titleText));
-  if (msg.priority >= 3) title.appendChild(buildPriorityBadge(msg.priority));
-  left.appendChild(title);
+  if (titleText) {
+    const title = document.createElement('h3');
+    title.className = 'msg-title';
+    title.appendChild(document.createTextNode(titleText));
+    if (msg.priority >= 3) title.appendChild(buildPriorityBadge(msg.priority));
+    left.appendChild(title);
+  } else if (msg.priority >= 3) {
+    left.appendChild(buildPriorityBadge(msg.priority));
+  }
 
-  right.appendChild(iconButton('edit-btn', EDIT_ICON, `Edit message: ${titleText}`, 'edit-msg', msg.id));
-  right.appendChild(iconButton('copy-btn', COPY_ICON, `Copy message: ${titleText}`, 'copy-msg', msg.id));
+  const messageLabel = titleText || 'message';
+  right.appendChild(iconButton('edit-btn', EDIT_ICON, `Edit message: ${messageLabel}`, 'edit-msg', msg.id));
+  right.appendChild(iconButton('copy-btn', COPY_ICON, `Copy message: ${messageLabel}`, 'copy-msg', msg.id));
+  right.appendChild(iconButton('edit-btn delete-btn', DELETE_ICON, `Delete message: ${messageLabel}`, 'delete-msg', msg.id));
 
   header.append(left, right);
   card.appendChild(header);
@@ -1453,7 +1482,10 @@ function buildCard(msg, ctx) {
   } else {
     body.textContent = msg.message == null ? '' : String(msg.message);
   }
-  card.appendChild(body);
+  // A todo title that exactly repeats its body adds no information and makes
+  // the card sound broken when read aloud. Keep the title and omit the copy.
+  const duplicateTodoBody = ctx.isTodo && titleText && titleText.trim() === String(msg.message || '').trim();
+  if (!duplicateTodoBody) card.appendChild(body);
 
   const safeImage = safeHttpUrl(msg.image);
   if (safeImage) {
@@ -1880,6 +1912,89 @@ async function toggleMarkdownTask(msgId, index) {
     });
   } finally {
     msg._toggling = false;
+  }
+}
+
+async function requestTopicUnlock(topic) {
+  const passphrase = await promptForPassphrase();
+  if (!passphrase) return;
+  const meta = state.topicMeta[topic];
+  if (!meta || !meta.e2ee) return;
+
+  clearTopicCryptoState(topic);
+  state.passphrases[topic] = passphrase;
+  const locked = (state.messages[topic] || []).filter(msg => msg._locked);
+  await Promise.all(locked.map(msg => tryDecryptMessage(topic, msg)));
+  if (!locked.some(msg => !msg._locked)) {
+    clearTopicCryptoState(topic);
+    toastError("That passphrase couldn't decrypt this topic.");
+    return;
+  }
+
+  try {
+    state.topicKeys[topic] = await PigeonCrypto.deriveKey(passphrase, meta.salt, meta.iter);
+    await PigeonKeystore.putTopicKey(topic, { passphrase, salt: meta.salt, iter: meta.iter, e2ee: true });
+    renderMessages();
+    announce(`Unlocked ${topic}.`);
+  } catch (err) {
+    clearTopicCryptoState(topic);
+    console.error('unlockTopic failed:', err);
+    toastError("Couldn't save this topic's passphrase.");
+  }
+}
+
+function promptForPassphrase() {
+  if (!unlockDialog || !unlockForm || !unlockPassphrase || typeof unlockDialog.showModal !== 'function') {
+    return Promise.resolve(window.prompt('Enter the shared passphrase:') || '');
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      unlockForm.removeEventListener('submit', onSubmit);
+      unlockDialog.removeEventListener('close', onClose);
+      unlockPassphrase.value = '';
+      resolve(value);
+    };
+    const onSubmit = (event) => {
+      event.preventDefault();
+      const submitter = event.submitter;
+      const value = submitter && submitter.value === 'unlock' ? unlockPassphrase.value : '';
+      finish(value);
+      unlockDialog.close();
+    };
+    const onClose = () => finish('');
+    unlockForm.addEventListener('submit', onSubmit);
+    unlockDialog.addEventListener('close', onClose, { once: true });
+    unlockDialog.showModal();
+    unlockPassphrase.focus();
+  });
+}
+
+async function requestDeleteMessage(id) {
+  const topic = state.activeTopic;
+  const msg = (state.messages[topic] || []).find(item => item.id === id);
+  if (!topic || !msg) return;
+  const label = msg.title || String(msg.message || 'this message').slice(0, 80);
+  const confirmed = await confirmDialog({
+    title: 'Delete message?',
+    body: `This permanently deletes “${label}”.`,
+    confirmLabel: 'Delete',
+    destructive: true,
+  });
+  if (!confirmed) return;
+  try {
+    await apiFetch(`/${topic}/messages/${id}`, { method: 'DELETE' });
+    state.messages[topic] = (state.messages[topic] || []).filter(item => item.id !== id);
+    forgetMessageOrder(id);
+    if (state.editing && state.editing.id === id) cancelEdit();
+    else renderMessages();
+    showToast('Message deleted.', { tone: 'success' });
+    announce('Message deleted.');
+  } catch (err) {
+    console.error('requestDeleteMessage failed:', err);
+    toastError("Couldn't delete that message.", { actionLabel: 'Retry', onAction: () => requestDeleteMessage(id) });
   }
 }
 

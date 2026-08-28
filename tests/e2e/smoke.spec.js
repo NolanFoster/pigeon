@@ -509,3 +509,51 @@ test('ticking a markdown task keeps its message in place and keeps focus', async
   // And the republished card must not replay the entrance animation.
   await expect(checklistCard).not.toHaveClass(/is-new/);
 });
+
+test('todo cards avoid duplicate title and body content', async ({ page, request, baseURL }) => {
+  const topic = `smoke-card-${Date.now()}`;
+  await page.goto('/');
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#subscribe-btn').click();
+
+  const res = await request.post(`${baseURL}/${topic}`, {
+    headers: { 'X-Title': 'Buy milk', 'X-Tags': 'todo' },
+    data: 'Buy milk',
+  });
+  expect(res.ok()).toBeTruthy();
+  const card = page.locator('.message-card');
+  await expect(card.locator('.msg-title')).toHaveText(/Buy milk/);
+  await expect(card.locator('.msg-body')).toHaveCount(0);
+  await expect(card.locator('.delete-btn')).toHaveAttribute('aria-label', 'Delete message: Buy milk');
+});
+
+test('deleting a message requires confirmation', async ({ page, request, baseURL }) => {
+  const topic = `smoke-delete-${Date.now()}`;
+  await page.goto('/');
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#subscribe-btn').click();
+  const res = await request.post(`${baseURL}/${topic}`, { headers: { 'X-Title': 'Disposable' }, data: 'remove me' });
+  expect(res.ok()).toBeTruthy();
+
+  await page.locator('.message-card .delete-btn').click();
+  await expect(page.locator('#app-dialog')).toContainText('Delete message?');
+  await page.locator('#app-dialog-cancel').click();
+  await expect(page.locator('.message-card')).toHaveCount(1);
+
+  await page.locator('.message-card .delete-btn').click();
+  await page.locator('#app-dialog-confirm').click();
+  await expect(page.locator('.message-card')).toHaveCount(0);
+});
+
+test('untitled messages lead with their body instead of the topic name', async ({ page, request, baseURL }) => {
+  const topic = `smoke-untitled-${Date.now()}`;
+  await page.goto('/');
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#subscribe-btn').click();
+  const res = await request.post(`${baseURL}/${topic}`, { data: 'Body with no title' });
+  expect(res.ok()).toBeTruthy();
+
+  const card = page.locator('.message-card');
+  await expect(card.locator('.msg-title')).toHaveCount(0);
+  await expect(card.locator('.msg-body')).toHaveText('Body with no title');
+});

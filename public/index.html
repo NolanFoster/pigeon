@@ -130,6 +130,19 @@
     </div>
   </dialog>
 
+  <dialog id="unlock-dialog" class="app-dialog" aria-labelledby="unlock-dialog-title">
+    <form id="unlock-form" method="dialog">
+      <h2 id="unlock-dialog-title" class="app-dialog-title">Unlock encrypted topic</h2>
+      <p class="app-dialog-body">Enter the shared passphrase. It is stored only in this browser.</p>
+      <label for="unlock-passphrase" class="visually-hidden">Shared passphrase</label>
+      <input id="unlock-passphrase" class="dialog-input" type="password" autocomplete="current-password" required>
+      <div class="app-dialog-actions">
+        <button type="submit" value="cancel" class="btn btn-tertiary" formnovalidate>Cancel</button>
+        <button type="submit" value="unlock" class="btn btn-primary">Unlock</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/purify.min.js"></script>
   <script src="/vendor/Sortable.min.js"></script>
