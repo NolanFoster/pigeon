@@ -1461,7 +1461,9 @@ function buildCard(msg, ctx) {
     wrap.className = 'msg-image';
     const img = document.createElement('img');
     img.src = safeImage;
-    img.alt = '';
+    // The title is publisher-supplied and describes the image when available.
+    // Keep an explicitly empty alt for purely decorative images without one.
+    img.alt = typeof msg.imageAlt === 'string' ? msg.imageAlt : (msg.title || '');
     img.loading = 'lazy';
     wrap.appendChild(img);
     card.appendChild(wrap);
@@ -1483,7 +1485,7 @@ function buildCard(msg, ctx) {
 // minute must not rebuild (and re-animate) every card.
 function cardSignature(msg, ctx) {
   return JSON.stringify([
-    msg.title, msg.message, msg.tags, msg.priority, msg.image,
+    msg.title, msg.message, msg.tags, msg.priority, msg.image, msg.imageAlt,
     !!msg.markdown, !!msg._locked, ctx.isTodo, ctx.isDone, ctx.editingThis,
   ]);
 }

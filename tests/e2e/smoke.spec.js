@@ -43,6 +43,28 @@ test('subscribe, receive a message, and copy it', async ({ page, request, baseUR
   expect(clipboardText).toBe('Hello from the smoke test');
 });
 
+test('message images reserve layout space and use their title as alt text', async ({ page, request, baseURL }) => {
+  const topic = `smoke-image-${Date.now()}`;
+  const title = 'A field of wildflowers';
+
+  await page.goto('/');
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#subscribe-btn').click();
+
+  const res = await request.post(`${baseURL}/${topic}`, {
+    headers: { 'X-Title': title, 'X-Image': 'https://example.com/wildflowers.jpg' },
+    data: 'Image message',
+  });
+  expect(res.ok()).toBeTruthy();
+
+  const image = page.locator('.message-card .msg-image img');
+  await expect(image).toHaveAttribute('alt', title);
+  await expect(image).toHaveCSS('aspect-ratio', '16 / 9');
+
+  const tagsInput = page.locator('#compose-tags');
+  await expect(tagsInput).toHaveCSS('padding-left', '28px');
+});
+
 test('clicking a link in a message does not navigate the app away', async ({ page, request, baseURL }) => {
   const topic = `smoke-link-${Date.now()}`;
 
