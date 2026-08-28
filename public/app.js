@@ -21,7 +21,10 @@ const state = {
   // True while an enable/disable is in flight, so the button can't be
   // double-fired into an inconsistent state.
   pushBusy: false,
-  filterTag: null,
+  // topic -> Set of active filter tags (AND semantics). Per-topic so a
+  // filter never leaks across topic switches; the URL mirrors it so a
+  // filtered view can be shared and restored after reload.
+  filterTags: new Map(),
 };
 
 // fetch() resolves for 4xx/5xx, so a bare `await fetch(...)` inside a try block
@@ -552,7 +555,8 @@ async function init() {
   renderTopicTabs();
 
   if (state.topics.length > 0) {
-    selectTopic(state.topics[0]);
+    const restored = restoreFromUrl();
+    if (!restored) selectTopic(state.topics[0]);
   }
 
   if (launchAction === 'compose' && state.activeTopic) {
@@ -986,6 +990,7 @@ function selectTopic(topic) {
   setOfflineHistoryNotice(topic, state.offlineHistory.get(topic));
   renderTopicTabs();
   renderMessages();
+  syncUrl();
 }
 
 // Unsubscribing from an encrypted topic destroys the only copy of its
@@ -1063,6 +1068,7 @@ function removeTopic(topic) {
       messagesSection.hidden = true;
       renderTopicTabs();
       renderMessages();
+      syncUrl();
     }
   } else {
     renderTopicTabs();
@@ -1504,14 +1510,30 @@ function buildPriorityBadge(priority) {
   return badge;
 }
 
-function buildTagChip(raw) {
+function buildTagChip(raw, active = false) {
   const chip = document.createElement('button');
   chip.type = 'button';
   chip.className = 'tag-chip';
   chip.dataset.action = 'filter-tag';
   chip.dataset.tag = raw;
-  chip.textContent = emojifyTag(raw);
-  // The visible label may be emoji-only; keep the real tag name reachable.
+  if (active) chip.classList.add('is-active');
+  chip.setAttribute('aria-pressed', active ? 'true' : 'false');
+
+  // Emoji is additive and decorative — the real tag name is always shown so a
+  // tag is never replaced by a bare glyph (WCAG 1.1.1 / 1.4.1).
+  const { emoji, label } = emojifyTag(raw);
+  if (emoji) {
+    const icon = document.createElement('span');
+    icon.className = 'tag-chip-emoji';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = emoji;
+    chip.appendChild(icon);
+  }
+  const text = document.createElement('span');
+  text.className = 'tag-chip-label';
+  text.textContent = label;
+  chip.appendChild(text);
+
   chip.setAttribute('aria-label', `Filter by tag: ${raw}`);
   return chip;
 }
@@ -1637,7 +1659,7 @@ function buildCard(msg, ctx) {
   if (tagNames.length) {
     const tags = document.createElement('div');
     tags.className = 'msg-tags';
-    for (const raw of tagNames) tags.appendChild(buildTagChip(raw));
+    for (const raw of tagNames) tags.appendChild(buildTagChip(raw, isTagActive(raw)));
     card.appendChild(tags);
   }
 
@@ -1664,6 +1686,7 @@ function getCard(msg, ctx) {
     // instead of leaving a tick the server never recorded.
     const cb = cached.querySelector('.todo-checkbox');
     if (cb && cb.checked !== ctx.isDone) cb.checked = ctx.isDone;
+    syncChipPressedState(cached);
     return cached;
   }
   const card = buildCard(msg, ctx);
@@ -1689,24 +1712,12 @@ function getComposeSlot(id) {
 }
 
 function buildFilterRow(uniqueTags) {
-  if (state.filterTag) {
-    const banner = document.createElement('div');
-    banner.className = 'filter-banner';
-    const label = document.createElement('span');
-    label.appendChild(document.createTextNode('Filtering by tag: '));
-    const strong = document.createElement('strong');
-    strong.textContent = emojifyTag(state.filterTag);
-    label.appendChild(strong);
-    banner.appendChild(label);
-    const clear = document.createElement('button');
-    clear.type = 'button';
-    clear.className = 'btn btn-tertiary clear-filter-btn';
-    clear.dataset.action = 'clear-filter';
-    clear.textContent = 'Clear Filter';
-    banner.appendChild(clear);
-    return banner;
-  }
-  if (uniqueTags.length === 0) return null;
+  const active = new Set(getActiveFilterTags());
+  // Keep an active chip reachable even when its tag no longer appears in the
+  // topic's current tag set (e.g. every matching message was deleted), so the
+  // user can still toggle it off.
+  const chipTags = Array.from(new Set([...uniqueTags, ...active])).sort();
+  if (chipTags.length === 0) return null;
 
   const row = document.createElement('div');
   row.className = 'tags-row';
@@ -1718,13 +1729,21 @@ function buildFilterRow(uniqueTags) {
   chips.className = 'tags-chips-container';
   chips.setAttribute('role', 'group');
   chips.setAttribute('aria-labelledby', 'tags-row-label');
-  for (const t of uniqueTags) chips.appendChild(buildTagChip(t));
+  for (const t of chipTags) chips.appendChild(buildTagChip(t, active.has(t)));
+  if (active.size > 0) {
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'btn btn-tertiary clear-filter-btn';
+    clear.dataset.action = 'clear-filter';
+    clear.textContent = 'Clear';
+    chips.appendChild(clear);
+  }
   row.append(label, chips);
   return row;
 }
 
 function getFilterRow(uniqueTags) {
-  const sig = JSON.stringify([state.filterTag, uniqueTags]);
+  const sig = JSON.stringify([getActiveFilterTags(), uniqueTags]);
   if (filterRowSig !== sig) {
     filterRowSig = sig;
     filterRowEl = buildFilterRow(uniqueTags);
@@ -1756,8 +1775,8 @@ function buildEmptyState(kind, topic) {
     hint.textContent = 'Select a topic from the list or subscribe to a new one.';
     wrap.append(title, hint);
   } else if (kind === 'filtered') {
-    title.textContent = 'No messages with this tag';
-    hint.textContent = 'Try clearing the filter or sending a message with this tag.';
+    title.textContent = 'No messages match this filter';
+    hint.textContent = 'Try clearing the filter or sending a message with these tags.';
     wrap.append(title, hint);
   } else {
     title.textContent = 'Listening for messages';
@@ -1807,8 +1826,12 @@ function renderMessages() {
   // Every tag present in the topic, offered as quick filters.
   const uniqueTags = Array.from(new Set(msgs.flatMap(m => msgTags(m)))).sort();
 
-  if (state.filterTag) {
-    msgs = msgs.filter(m => msgTags(m).includes(state.filterTag));
+  const activeFilterTags = getActiveFilterTags();
+  if (activeFilterTags.length > 0) {
+    msgs = msgs.filter(m => {
+      const tags = msgTags(m);
+      return activeFilterTags.every(t => tags.includes(t));
+    });
   }
 
   const filterRow = getFilterRow(uniqueTags);
@@ -1834,7 +1857,7 @@ function renderMessages() {
   }
 
   if (msgs.length === 0) {
-    desired.push(getEmptyState(state.filterTag ? 'filtered' : 'listening', topic));
+    desired.push(getEmptyState(activeFilterTags.length ? 'filtered' : 'listening', topic));
   }
 
   reconcileChildren(messagesList, desired);
@@ -1861,14 +1884,75 @@ function placeCompose() {
   if (composeEl.parentElement !== composeHome) composeHome.appendChild(composeEl);
 }
 
+function isTagActive(tag) {
+  if (!state.activeTopic) return false;
+  const set = state.filterTags.get(state.activeTopic);
+  return !!set && set.has(tag);
+}
+
+function getActiveFilterTags() {
+  if (!state.activeTopic) return [];
+  const set = state.filterTags.get(state.activeTopic);
+  return set ? Array.from(set).sort() : [];
+}
+
+// Toggle a filter chip. Active filters are AND-ed: a message must carry every
+// active tag to stay visible.
 function setFilterTag(tag) {
-  state.filterTag = tag;
+  if (!state.activeTopic) return;
+  let set = state.filterTags.get(state.activeTopic);
+  if (!set) {
+    set = new Set();
+    state.filterTags.set(state.activeTopic, set);
+  }
+  if (set.has(tag)) set.delete(tag);
+  else set.add(tag);
+  if (set.size === 0) state.filterTags.delete(state.activeTopic);
   renderMessages();
+  syncUrl();
 }
 
 function clearFilterTag() {
-  state.filterTag = null;
+  if (!state.activeTopic) return;
+  state.filterTags.delete(state.activeTopic);
   renderMessages();
+  syncUrl();
+}
+
+// Keep message-card chips' pressed state in sync after a filter change without
+// rebuilding the card (cardSignature deliberately omits filter state).
+function syncChipPressedState(root) {
+  root.querySelectorAll('.tag-chip').forEach((chip) => {
+    const on = isTagActive(chip.dataset.tag);
+    chip.classList.toggle('is-active', on);
+    chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+
+// Mirror the active topic and its filter in the URL query string so a filtered
+// view can be shared and survives reload. replaceState avoids history spam.
+function syncUrl() {
+  const params = new URLSearchParams(location.search);
+  const topic = state.activeTopic;
+  const tags = getActiveFilterTags();
+  if (topic) params.set('topic', topic);
+  else params.delete('topic');
+  if (tags.length) params.set('tags', tags.join(','));
+  else params.delete('tags');
+  const qs = params.toString();
+  history.replaceState(null, '', location.pathname + (qs ? `?${qs}` : '') + location.hash);
+}
+
+// Restore the topic/filter encoded in ?topic=…&tags=… when still subscribed.
+function restoreFromUrl() {
+  const params = new URLSearchParams(location.search);
+  const topic = params.get('topic');
+  if (!topic || !state.topics.includes(topic)) return false;
+  const tagsParam = params.get('tags');
+  const tags = tagsParam ? tagsParam.split(',').map(t => t.trim()).filter(Boolean) : [];
+  if (tags.length) state.filterTags.set(topic, new Set(tags));
+  selectTopic(topic);
+  return true;
 }
 
 async function toggleTodo(id, topic, done) {
@@ -2860,9 +2944,10 @@ const EMOJI_SHORTCODES = {
 };
 
 function emojifyTag(tag) {
-  // Accept either `tada` or `:tada:`; leave unknown shortcodes alone.
+  // Accept either `tada` or `:tada:`; leave unknown shortcodes alone. Returns
+  // the emoji (decorative) separately from the label (always the real tag).
   const key = tag.replace(/^:|:$/g, '');
-  return EMOJI_SHORTCODES[key] || tag;
+  return { emoji: EMOJI_SHORTCODES[key] || null, label: tag };
 }
 
 // Escapes &, <, > only — safe for HTML text content. Do NOT use inside HTML

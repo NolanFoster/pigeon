@@ -122,16 +122,21 @@ test('tag filter hides non-matching messages', async ({ page, request, baseURL }
 
   await expect(page.locator('.message-card')).toHaveCount(2);
 
-  await page.locator('.tags-row .tag-chip', { hasText: 'alpha' }).click();
-  await expect(page.locator('.filter-banner')).toBeVisible();
+  // Filter chips toggle a selected state and all chips stay visible while
+  // filtering (no banner replaces the row).
+  const alphaChip = page.locator('.tags-row .tag-chip', { hasText: 'alpha' });
+  await alphaChip.click();
+  await expect(alphaChip).toHaveClass(/is-active/);
+  await expect(alphaChip).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('.message-card')).toHaveCount(1);
   await expect(page.locator('.message-card .msg-title')).toContainText('Alpha');
+  await expect(page.locator('.tags-row .tag-chip', { hasText: 'beta' })).toBeVisible();
 
   await page.locator('.clear-filter-btn').click();
   await expect(page.locator('.message-card')).toHaveCount(2);
 });
 
-test('tag shortcodes render as emoji', async ({ page, request, baseURL }) => {
+test('tag shortcodes decorate the label instead of replacing it', async ({ page, request, baseURL }) => {
   const topic = `smoke-emoji-${Date.now()}`;
 
   await page.goto('/');
@@ -146,15 +151,64 @@ test('tag shortcodes render as emoji', async ({ page, request, baseURL }) => {
 
   const chips = page.locator('.message-card .msg-tags .tag-chip');
   await expect(chips).toHaveCount(4);
-  await expect(chips.nth(0)).toHaveText('🎉');
-  await expect(chips.nth(1)).toHaveText('👀');
-  await expect(chips.nth(2)).toHaveText('✅');
+  // The real tag name is always present; the emoji is decorative and additive.
+  await expect(chips.nth(0)).toContainText('tada');
+  await expect(chips.nth(1)).toContainText('eyes');
+  await expect(chips.nth(2)).toContainText('white_check_mark');
   await expect(chips.nth(3)).toHaveText('notashortcode');
+  await expect(chips.nth(0).locator('.tag-chip-emoji')).toHaveText('🎉');
 
-  // Filtering still keys off the raw shortcode — click the 🎉 chip, expect it to stick.
+  // Filtering still keys off the raw shortcode — click the tada chip and the
+  // filter row shows it selected.
   await chips.nth(0).click();
-  await expect(page.locator('.filter-banner strong')).toHaveText('🎉');
+  await expect(page.locator('.tags-row .tag-chip', { hasText: 'tada' })).toHaveClass(/is-active/);
   await expect(page.locator('.message-card')).toHaveCount(1);
+});
+
+test('multi-tag filtering is AND-ed, per-topic, and reflected in the URL', async ({ page, request, baseURL }) => {
+  const topic = `smoke-multi-${Date.now()}`;
+
+  await page.goto('/');
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#subscribe-btn').click();
+  await expect(page.locator('.topic-tab.active')).toContainText(topic);
+
+  await request.post(`${baseURL}/${topic}`, {
+    headers: { 'X-Title': 'Both', 'X-Tags': 'alpha,beta' },
+    data: 'both',
+  });
+  await request.post(`${baseURL}/${topic}`, {
+    headers: { 'X-Title': 'Alpha only', 'X-Tags': 'alpha' },
+    data: 'alpha',
+  });
+  await request.post(`${baseURL}/${topic}`, {
+    headers: { 'X-Title': 'Beta only', 'X-Tags': 'beta' },
+    data: 'beta',
+  });
+  await expect(page.locator('.message-card')).toHaveCount(3);
+
+  // Two active chips narrow the list with AND semantics.
+  await page.locator('.tags-row .tag-chip', { hasText: 'alpha' }).click();
+  await expect(page.locator('.message-card')).toHaveCount(2);
+  await page.locator('.tags-row .tag-chip', { hasText: 'beta' }).click();
+  await expect(page.locator('.message-card')).toHaveCount(1);
+  await expect(page.locator('.message-card .msg-title')).toContainText('Both');
+
+  // The filter is mirrored in the URL query string.
+  await expect.poll(() => page.url()).toContain('tags=alpha,beta');
+
+  // Reload restores the same filtered view.
+  await page.reload();
+  await expect(page.locator('.topic-tab.active')).toContainText(topic);
+  await expect(page.locator('.message-card')).toHaveCount(1);
+  await expect(page.locator('.tags-row .tag-chip', { hasText: 'alpha' })).toHaveClass(/is-active/);
+  await expect(page.locator('.tags-row .tag-chip', { hasText: 'beta' })).toHaveClass(/is-active/);
+
+  // Toggling one chip off leaves only the other filter applied.
+  await page.locator('.tags-row .tag-chip', { hasText: 'beta' }).click();
+  await expect(page.locator('.message-card')).toHaveCount(2);
+  await expect.poll(() => page.url()).toContain('tags=alpha');
+  await expect.poll(() => page.url()).not.toContain('beta');
 });
 
 test('end-to-end encrypted topic: only subscribers with passphrase can read', async ({ page, request, baseURL }) => {
@@ -376,7 +430,7 @@ test('tag chips are reachable and operable by keyboard', async ({ page, request,
   await chip.focus();
   await page.keyboard.press('Enter');
 
-  await expect(page.locator('.filter-banner')).toBeVisible();
+  await expect(chip).toHaveClass(/is-active/);
   await expect(page.locator('.message-card')).toHaveCount(1);
 });
 

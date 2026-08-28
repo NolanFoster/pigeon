@@ -1084,6 +1084,20 @@ button {
   transform: translateY(-1px);
 }
 
+/* Selected filter chip — persistent version of the hover state. */
+.tag-chip.is-active {
+  background: var(--color-primary);
+  color: var(--color-bg);
+}
+
+.tag-chip-emoji {
+  margin-right: 0.35rem;
+}
+
+.tag-chip-label {
+  line-height: 1;
+}
+
 .tags-row {
   display: flex;
   align-items: center;
@@ -1105,22 +1119,9 @@ button {
   gap: 0.4rem;
 }
 
-.filter-banner {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background: var(--color-surface);
-  border: 1px solid var(--color-primary);
-  padding: 0.5rem 1rem;
-  border-radius: var(--radius-md);
-  margin-bottom: 0.75rem;
-  font-size: 0.9rem;
-  color: var(--color-text);
-  box-shadow: var(--shadow-sm);
-}
-
 .clear-filter-btn {
   font-size: 0.8rem;
+  align-self: center;
 }
 
 .compose {
