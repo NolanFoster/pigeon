@@ -615,3 +615,28 @@ test('untitled messages lead with their body instead of the topic name', async (
   await expect(card.locator('.msg-title')).toHaveCount(0);
   await expect(card.locator('.msg-body')).toHaveText('Body with no title');
 });
+
+test('the composer is pinned to the bottom and the docs panel is collapsible', async ({ page }) => {
+  await page.goto('/');
+
+  // Subscribe so the messages section (and the composer inside it) is shown.
+  const topic = `smoke-compose-${Date.now()}`;
+  await page.locator('#topic-input').fill(topic);
+  await page.locator('#subscribe-btn').click();
+  await expect(page.locator('.topic-tab.active')).toContainText(topic);
+  await expect(page.locator('.compose')).toBeVisible();
+
+  // The compose box is the primary action — it must stay anchored so a long
+  // message list can't bury it (issue: "compose box is buried below an
+  // unbounded message list").
+  await expect(page.locator('.compose')).toHaveCSS('position', 'sticky');
+  await expect(page.locator('.compose')).toHaveCSS('bottom', '0px');
+
+  // The curl examples are out of the main scroll flow: collapsed by default,
+  // expandable on demand.
+  const usage = page.locator('details.usage');
+  await expect(usage).toHaveCount(1);
+  await expect(usage).not.toHaveAttribute('open', '');
+  await usage.locator('summary.usage-summary').click();
+  await expect(usage).toHaveAttribute('open', '');
+});

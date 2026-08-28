@@ -102,15 +102,17 @@
         </div>
       </section>
 
-      <section class="usage" aria-labelledby="usage-heading">
-        <h2 id="usage-heading">Send a message</h2>
-        <div class="code-wrapper"><button class="code-copy-btn" data-action="copy-code">Copy</button><pre><code>curl -d "Hello!" https://your-worker.dev/mytopic</code></pre></div>
-        <p>With title and priority:</p>
-        <div class="code-wrapper"><button class="code-copy-btn" data-action="copy-code">Copy</button><pre><code>curl -H "X-Title: Alert" -H "X-Priority: 5" \
+      <details class="usage" id="usage-details">
+        <summary class="usage-summary">Send a message (curl examples)</summary>
+        <div class="usage-body">
+          <div class="code-wrapper"><button class="code-copy-btn" data-action="copy-code">Copy</button><pre><code>curl -d "Hello!" https://your-worker.dev/mytopic</code></pre></div>
+          <p>With title and priority:</p>
+          <div class="code-wrapper"><button class="code-copy-btn" data-action="copy-code">Copy</button><pre><code>curl -H "X-Title: Alert" -H "X-Priority: 5" \
      -d "Server is down!" https://your-worker.dev/mytopic</code></pre></div>
-        <p>As a todo (renders with a checkbox; check it in the UI to mark complete):</p>
-        <div class="code-wrapper"><button class="code-copy-btn" data-action="copy-code">Copy</button><pre><code>curl -H "X-Tags: todo" -d "Buy milk" https://your-worker.dev/groceries</code></pre></div>
-      </section>
+          <p>As a todo (renders with a checkbox; check it in the UI to mark complete):</p>
+          <div class="code-wrapper"><button class="code-copy-btn" data-action="copy-code">Copy</button><pre><code>curl -H "X-Tags: todo" -d "Buy milk" https://your-worker.dev/groceries</code></pre></div>
+        </div>
+      </details>
     </main>
   </div>
 
