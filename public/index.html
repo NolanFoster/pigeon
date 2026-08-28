@@ -8,14 +8,11 @@
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#faf8f5">
   <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#12100d">
   <link rel="icon" type="image/png" href="/favicon.png">
-  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Pigeon">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="manifest" href="/manifest.json">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/vendor/toastui-editor.min.css">
   <link rel="stylesheet" href="/vendor/toastui-editor-dark.min.css">
@@ -66,6 +63,7 @@
 
       <section id="messages-section" class="messages" hidden aria-label="Messages">
         <div class="messages-header">
+          <p id="offline-history-notice" class="offline-history-notice" role="status" hidden>Offline — showing cached messages.</p>
           <button id="share-topic-btn" class="btn btn-tertiary share-btn" data-action="share-topic" hidden>Share encrypted link</button>
           <button id="clear-completed-btn" class="btn btn-tertiary btn-destructive clear-btn" hidden>Clear completed</button>
           <button id="clear-messages-btn" class="btn btn-tertiary btn-destructive clear-btn">Clear</button>

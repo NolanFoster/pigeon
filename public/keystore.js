@@ -9,8 +9,9 @@
 
 (function (root) {
   const DB_NAME = 'pigeon';
-  const DB_VERSION = 1;
+  const DB_VERSION = 2;
   const STORE_KEYS = 'topic_keys';
+  const STORE_MESSAGES = 'topic_messages';
 
   function open() {
     return new Promise((resolve, reject) => {
@@ -19,6 +20,9 @@
         const db = req.result;
         if (!db.objectStoreNames.contains(STORE_KEYS)) {
           db.createObjectStore(STORE_KEYS, { keyPath: 'topic' });
+        }
+        if (!db.objectStoreNames.contains(STORE_MESSAGES)) {
+          db.createObjectStore(STORE_MESSAGES, { keyPath: 'topic' });
         }
       };
       req.onsuccess = () => resolve(req.result);
@@ -60,5 +64,34 @@
     db.close();
   }
 
-  root.PigeonKeystore = { putTopicKey, getTopicKey, deleteTopicKey };
+  async function putTopicMessages(topic, messages) {
+    const db = await open();
+    const tx = db.transaction(STORE_MESSAGES, 'readwrite');
+    tx.objectStore(STORE_MESSAGES).put({ topic, messages, updatedAt: Date.now() });
+    await txPromise(tx);
+    db.close();
+  }
+
+  async function getTopicMessages(topic) {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_MESSAGES, 'readonly');
+      const req = tx.objectStore(STORE_MESSAGES).get(topic);
+      req.onsuccess = () => { db.close(); resolve(req.result ? req.result.messages : null); };
+      req.onerror = () => { db.close(); reject(req.error); };
+    });
+  }
+
+  async function deleteTopicMessages(topic) {
+    const db = await open();
+    const tx = db.transaction(STORE_MESSAGES, 'readwrite');
+    tx.objectStore(STORE_MESSAGES).delete(topic);
+    await txPromise(tx);
+    db.close();
+  }
+
+  root.PigeonKeystore = {
+    putTopicKey, getTopicKey, deleteTopicKey,
+    putTopicMessages, getTopicMessages, deleteTopicMessages,
+  };
 })(typeof self !== 'undefined' ? self : window);

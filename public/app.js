@@ -11,6 +11,9 @@ const state = {
   decryptKeyCache: {},
   activeTopic: null,
   messages: {},       // topic -> Message[]
+  // topic -> offline-history notice text
+  offlineHistory: new Map(),
+  connectingTopics: new Set(),
   eventSources: {},   // topic -> { ws, heartbeatId }
   unreadCounts: {},
   pushEnabled: false,
@@ -100,7 +103,8 @@ function clearTopicCryptoState(topic) {
 // `msg._locked = true` so the UI shows a clean placeholder instead of
 // leaking raw envelope JSON.
 async function tryDecryptMessage(topic, msg) {
-  const env = PigeonCrypto.parseEnvelope(msg.message);
+  if (!msg._encryptedMessage) msg._encryptedMessage = msg.message;
+  const env = PigeonCrypto.parseEnvelope(msg._encryptedMessage);
   const looksEncrypted = !!msg.encrypted || !!env;
   if (!looksEncrypted) return msg;
   if (!env) {
@@ -142,6 +146,7 @@ const messagesSection = document.getElementById('messages-section');
 const messagesList = document.getElementById('messages-list');
 const enablePushBtn = document.getElementById('enable-push-btn');
 const pushHint = document.getElementById('push-hint');
+const offlineHistoryNotice = document.getElementById('offline-history-notice');
 const clearMessagesBtn = document.getElementById('clear-messages-btn');
 const clearCompletedBtn = document.getElementById('clear-completed-btn');
 const liveRegion = document.getElementById('live-region');
@@ -151,6 +156,49 @@ const connectionStatusEl = document.getElementById('connection-status');
 const unlockDialog = document.getElementById('unlock-dialog');
 const unlockForm = document.getElementById('unlock-form');
 const unlockPassphrase = document.getElementById('unlock-passphrase');
+
+// Keep a bounded local copy of server history so subscribed topics remain
+// useful when the PWA starts without a network connection. Encrypted messages
+// are written as their original ciphertext, never their decrypted fields.
+const OFFLINE_MESSAGE_LIMIT = 200;
+
+function messageForCache(msg) {
+  const cached = { ...msg, message: msg._encryptedMessage || msg.message };
+  delete cached._encryptedMessage;
+  delete cached._decrypted;
+  delete cached._locked;
+  return cached;
+}
+
+function cacheTopicMessages(topic) {
+  const messages = (state.messages[topic] || [])
+    .slice(0, OFFLINE_MESSAGE_LIMIT)
+    .map(messageForCache);
+  return PigeonKeystore.putTopicMessages(topic, messages)
+    .catch(err => console.warn(`Couldn't cache messages for ${topic}:`, err));
+}
+
+async function getCachedMessages(topic) {
+  try {
+    const cached = await PigeonKeystore.getTopicMessages(topic);
+    if (!Array.isArray(cached) || cached.length === 0) return [];
+    await Promise.all(cached.map(msg => tryDecryptMessage(topic, msg)));
+    return cached;
+  } catch (err) {
+    console.warn(`Couldn't restore cached messages for ${topic}:`, err);
+    return [];
+  }
+}
+
+function setOfflineHistoryNotice(topic, message = '') {
+  if (message) state.offlineHistory.set(topic, message);
+  else state.offlineHistory.delete(topic);
+  if (offlineHistoryNotice) {
+    const text = state.offlineHistory.get(state.activeTopic) || '';
+    offlineHistoryNotice.textContent = text;
+    offlineHistoryNotice.hidden = !text;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Feedback primitives
@@ -455,6 +503,12 @@ function initTopicSortable() {
 
 // Initialize
 async function init() {
+  // Handle launch actions before asynchronous PWA setup. This makes a
+  // subscribe shortcut immediately ready for input even while the service
+  // worker is being installed or updated.
+  const launchAction = new URLSearchParams(location.search).get('action');
+  if (launchAction === 'subscribe') topicInput.focus();
+
   // Push cleanup that shouldn't hold up the rest of startup, but has to run in
   // order: a resumed teardown may queue work that the retry pass then picks up.
   let pushStartup = Promise.resolve();
@@ -499,6 +553,10 @@ async function init() {
 
   if (state.topics.length > 0) {
     selectTopic(state.topics[0]);
+  }
+
+  if (launchAction === 'compose' && state.activeTopic) {
+    document.getElementById('compose-title').focus();
   }
 
   // If the URL fragment carries a share link (#topic=...&k=...&s=...&i=...),
@@ -681,11 +739,26 @@ async function shareActiveTopic() {
 
 // Connect WebSocket for a topic
 async function connectTopic(topic) {
-  if (state.eventSources[topic]) return;
+  if (state.eventSources[topic] || state.connectingTopics.has(topic)) return;
+  state.connectingTopics.add(topic);
   state.messages[topic] = state.messages[topic] || [];
+  // Do not await IndexedDB before opening the live connection: publishing
+  // immediately after subscribing must not race a delayed cache read.
+  const cachedMessages = getCachedMessages(topic);
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${proto}//${location.host}/${topic}/sse`);
+  let ws;
+  try {
+    ws = new WebSocket(`${proto}//${location.host}/${topic}/sse?since=all`);
+  } catch (err) {
+    state.connectingTopics.delete(topic);
+    setOfflineHistoryNotice(topic, (state.messages[topic] || []).length
+      ? 'Offline — showing cached messages.'
+      : 'Offline — no cached messages are available yet.');
+    if (state.activeTopic === topic) renderMessages();
+    console.error(`Opening live connection for ${topic} failed:`, err);
+    return;
+  }
 
   // Buffer messages arriving before history is loaded
   const earlyMessages = [];
@@ -700,6 +773,8 @@ async function connectTopic(topic) {
       const reversed = msgs.reverse();
       await Promise.all(reversed.map(m => tryDecryptMessage(topic, m)));
       state.messages[topic] = reversed;
+      await cacheTopicMessages(topic);
+      setOfflineHistoryNotice(topic);
       // History isn't "new" — don't animate it in.
       markMessagesSeen(topic);
       // Merge any messages that arrived via WS while fetching history
@@ -714,6 +789,7 @@ async function connectTopic(topic) {
           newEarly++;
         }
       }
+      await cacheTopicMessages(topic);
       historyLoaded = true;
       if (state.activeTopic === topic) {
         renderMessages();
@@ -721,8 +797,57 @@ async function connectTopic(topic) {
         state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + newEarly;
         renderTopicTabs();
       }
+
+      // A publisher can POST immediately after the subscribe UI becomes,
+      // before its socket upgrade or the first D1 read has completed. Retry an
+      // empty initial read for a short, bounded period and merge results so a
+      // delayed read can never overwrite a message received live.
+      if (state.messages[topic].length === 0 && earlyMessages.length === 0) {
+        const recoverMissedInitialHistory = async (attempt = 0) => {
+          if (!state.topics.includes(topic) || state.messages[topic].length !== 0) return;
+          try {
+            const retry = await fetch(`/${topic}/json?since=all`);
+            if (!retry.ok) return;
+            const missed = await retry.json();
+            await Promise.all(missed.map(m => tryDecryptMessage(topic, m)));
+            let recovered = 0;
+            for (const msg of missed.reverse()) {
+              if (!state.messages[topic].some(m => m.id === msg.id)) {
+                insertMessage(topic, msg);
+                recovered++;
+              }
+            }
+            if (recovered > 0) {
+              await cacheTopicMessages(topic);
+              if (state.activeTopic === topic) renderMessages();
+              else {
+                state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + recovered;
+                renderTopicTabs();
+              }
+            } else if (attempt < 4 && state.messages[topic].length === 0) {
+              // D1 visibility and the WebSocket upgrade can each trail the
+              // publish response. Back off, but stop after about four seconds.
+              setTimeout(() => recoverMissedInitialHistory(attempt + 1), 250 * (2 ** attempt));
+            }
+          } catch (retryErr) {
+            console.warn(`Retrying initial history for ${topic} failed:`, retryErr);
+          }
+        };
+        setTimeout(recoverMissedInitialHistory, 250);
+      }
     } catch (err) {
+      // Only use the cache when server history is unavailable. A late IndexedDB
+      // read must never replace newer messages received from the server.
+      const cached = await cachedMessages;
+      if (state.topics.includes(topic) && cached.length > 0) {
+        state.messages[topic] = cached;
+        markMessagesSeen(topic);
+      }
       historyLoaded = true;
+      setOfflineHistoryNotice(topic, (state.messages[topic] || []).length
+        ? 'Offline — showing cached messages.'
+        : 'Offline — no cached messages are available yet.');
+      if (state.activeTopic === topic) renderMessages();
       console.error(`Loading history for ${topic} failed:`, err);
       toastError(`Couldn't load messages for ${topic}.`, {
         actionLabel: 'Retry',
@@ -745,6 +870,7 @@ async function connectTopic(topic) {
         const before = state.messages[topic].length;
         state.messages[topic] = state.messages[topic].filter(m => m.id !== msg.id);
         forgetMessageOrder(msg.id);
+        cacheTopicMessages(topic);
         // If the deleted message is currently being edited (locally or by
         // another client), bail out of edit mode so the inline compose form
         // doesn't get orphaned inside a slot that's about to disappear.
@@ -764,6 +890,7 @@ async function connectTopic(topic) {
       // Before anything renders: an edit echoing back takes the position (and
       // the focus identity) of the message it replaces instead of the top slot.
       insertMessage(topic, msg, matchRepublish(topic, msg));
+      cacheTopicMessages(topic);
       // Bookkeeping messages aren't news: the echo of an edit this client just
       // made, and the marker message that records a todo as complete (whose
       // body is the id of the todo it completes), are both silent. Announcing
@@ -809,6 +936,7 @@ async function connectTopic(topic) {
   }, 30000);
 
   state.eventSources[topic] = { ws, heartbeatId };
+  state.connectingTopics.delete(topic);
   renderConnectionStatus();
 }
 
@@ -855,6 +983,7 @@ function selectTopic(topic) {
   }
   // Point the tabpanel at the tab that controls it.
   messagesList.setAttribute('aria-labelledby', topicDomId(topic));
+  setOfflineHistoryNotice(topic, state.offlineHistory.get(topic));
   renderTopicTabs();
   renderMessages();
 }
@@ -906,6 +1035,7 @@ async function requestRemoveTopic(topic) {
 }
 
 function removeTopic(topic) {
+  state.connectingTopics.delete(topic);
   const wasActive = state.activeTopic === topic;
   disconnectTopic(topic);
   state.topics = state.topics.filter(t => t !== topic);
@@ -921,6 +1051,8 @@ function removeTopic(topic) {
   }
   clearTopicCryptoState(topic);
   PigeonKeystore.deleteTopicKey(topic).catch(err => console.error('keystore delete:', err));
+  PigeonKeystore.deleteTopicMessages(topic).catch(err => console.error('message cache delete:', err));
+  setOfflineHistoryNotice(topic);
 
   if (wasActive) {
     if (state.topics.length > 0) {
@@ -1988,6 +2120,7 @@ async function requestDeleteMessage(id) {
     await apiFetch(`/${topic}/messages/${id}`, { method: 'DELETE' });
     state.messages[topic] = (state.messages[topic] || []).filter(item => item.id !== id);
     forgetMessageOrder(id);
+    cacheTopicMessages(topic);
     if (state.editing && state.editing.id === id) cancelEdit();
     else renderMessages();
     showToast('Message deleted.', { tone: 'success' });
@@ -2207,6 +2340,7 @@ clearMessagesBtn.addEventListener('click', async () => {
   try {
     await apiFetch(`/${topic}/messages`, { method: 'DELETE' });
     state.messages[topic] = [];
+    cacheTopicMessages(topic);
     renderMessages();
     showToast(`Deleted ${count} message${count === 1 ? '' : 's'} from ${topic}.`);
   } catch (err) {

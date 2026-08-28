@@ -15,10 +15,13 @@ pub async fn handle(req: Request, ctx: RouteContext<()>) -> Result<Response> {
         .map(|(_, v)| v.to_string())
         .unwrap_or_default();
 
+    // Forward the topic explicitly: a Durable Object can recover neither its
+    // name nor the route parameters, but needs it to replay durable history
+    // after registering the socket. This closes the subscribe/publish race.
     let do_url = if since.is_empty() {
-        "https://do/connect".to_string()
+        format!("https://do/connect?topic={}", topic)
     } else {
-        format!("https://do/connect?since={}", since)
+        format!("https://do/connect?topic={}&since={}", topic, since)
     };
 
     // Forward the original request headers (including Upgrade: websocket)
