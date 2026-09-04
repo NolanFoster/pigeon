@@ -47,6 +47,28 @@ curl -H "X-Markdown: 1" \
 | `X-Click` | URL to open on notification click | — |
 | `X-Markdown` | Set to `1` to enable markdown rendering | 0 |
 
+### Priority and delivery
+
+`X-Priority` isn't just cosmetic — it changes how the push service delivers the
+message (RFC 8030 `Urgency`/`TTL`) and how the toast behaves on the device.
+Default (no header) is **3 / normal**. Previously every message was sent with
+`Urgency: high` and `TTL: 86400`; that is now reserved for priorities 4–5.
+
+| `X-Priority` | Meaning | Urgency | TTL | Collapse | On-device |
+|--------------|---------|---------|-----|----------|-----------|
+| 1 | min | `very-low` | 1h | per topic | silent |
+| 2 | low | `low` | 1h | per topic | — |
+| 3 | default | `normal` | 4h | per topic | — |
+| 4 | high | `high` | 10m | per topic | re-alert (`renotify`) |
+| 5 | max / urgent | `high` | 2m | never | stays on screen (`requireInteraction`) |
+
+Priorities 1–4 share a per-topic collapse key, so a busy topic is a single toast
+that updates in place (like ntfy). Priority 5 keeps a unique tag so an urgent
+alert can never overwrite another. The RFC 8030 `Topic` header sent to the push
+service is a truncated SHA-256 hash of the topic name, never the raw name — the
+header is unencrypted and must not leak a capability-URL topic to the push
+service.
+
 ### API
 
 | Method | Path | Description |
@@ -83,6 +105,33 @@ If the server can't be reached, the delete is queued and retried on the next
 load and whenever the network comes back; the button reports that cleanup is
 still pending. Unsubscribing from a single topic unregisters push for that topic
 the same way.
+
+Chrome on Android now puts an **Unsubscribe** on every web-push toast. Pigeon
+treats that as the same "off" switch: when the permission flips to *denied*, the
+app runs the full teardown (`DELETE /push/subscribe`, revoke the subscription,
+remember the choice) and the header button returns to **Enable Push
+Notifications** — it does not show a "re-open Settings" prompt. If Chrome's
+Safety Check auto-revokes the grant instead (permission back to *default*), the
+button offers **Restore notifications** rather than silently re-subscribing.
+
+Every content notification also carries a **Mute topic** action. Tapping it
+unregisters only that topic's push row and closes the toast; other topics keep
+pushing and the PWA is not foregrounded. On browsers without notification
+actions (Safari on iOS) the button is simply omitted.
+
+### Installed-app notifications
+
+When the PWA is open (installed or sitting in a tab), push delivery respects
+what's already on screen:
+
+- A message for the topic you're currently viewing doesn't also raise an OS
+  toast — it's already in the list.
+- Tapping a notification for another topic focuses the existing window and
+  opens that topic, instead of spawning a second window.
+- The home-screen icon shows an unread-count badge (Chromium desktop/Android
+  and installed iOS 16.4+ PWAs); it clears as you read.
+- If Chrome rotates the push endpoint, the service worker resubscribes and
+  re-registers every topic automatically, so push doesn't silently stop.
 
 ### Todo lists
 
@@ -210,6 +259,12 @@ Frontend hardening:
   unguessable capability URL issued by the push service. Anyone holding it can
   already impersonate that subscriber, so being able to unregister it grants
   nothing new — and making "off" work without an account is worth more.
+- Chrome on Android runs an on-device model over notification titles, bodies,
+  and action labels. Pigeon never sends an empty body or a generic
+  "Pigeon"/"Alert" title, and it rejects action labels that read like
+  permission prompts (`Allow`, `Verify`, `Click here`, …) so a spammy topic
+  can't get the whole origin flagged. Anyone who can POST to a topic can still
+  make every subscriber's phone show a toast — keep topic names unguessable.
 
 ## License
 

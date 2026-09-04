@@ -87,6 +87,35 @@ function stripMarkdown(text) {
     .trim();
 }
 
+// ---------------------------------------------------------------------------
+// Honest-copy guards (#44). Chrome on Android runs an on-device model over
+// notification titles, bodies, and action labels. Publisher action labels that
+// read like permission prompts ("Allow", "Verify", "Click here", …) are dropped
+// so a spammy topic can't get the whole origin flagged. The server rejects the
+// same labels at parse time; this is the decrypt-side guard for E2EE topics.
+// ---------------------------------------------------------------------------
+const BANNED_ACTION_LABELS = /^(allow|verify|confirm|unsubscribe|click here|ok|continue|claim)$/i;
+
+function normalizeActionLabel(label) {
+  return String(label || '').trim().replace(/\s+/g, ' ');
+}
+
+function isBannedActionLabel(label) {
+  return BANNED_ACTION_LABELS.test(normalizeActionLabel(label));
+}
+
+function filterBannedActions(actions) {
+  if (!Array.isArray(actions)) return [];
+  return actions.filter(a => a && !isBannedActionLabel(a.title || a.label));
+}
+
+// A content notification is anything the publisher meant the user to see.
+// Control-plane closes (#43) are `message_clear` / `message_delete` and must
+// not grow a "Mute topic" button.
+function isContentNotification(data) {
+  return !data || (data.event !== 'message_clear' && data.event !== 'message_delete');
+}
+
 async function buildNotification(data) {
   // If the server flagged this as encrypted, try to decrypt with the stored
   // topic key. On any failure, fall back to a generic notification so the
@@ -101,33 +130,126 @@ async function buildNotification(data) {
         const key = await PigeonCrypto.deriveKey(rec.passphrase, envelope.kdf.salt, envelope.kdf.iter);
         const fields = await PigeonCrypto.decryptEnvelope(key, envelope);
         return {
-          title: fields.title || data.topic || 'Pigeon',
+          title: fields.title || data.topic || '',
           body: fields.markdown ? stripMarkdown(fields.message || '') : (fields.message || ''),
           image: fields.image || undefined,
           click: fields.click || undefined,
           topic: data.topic,
           id: data.id,
+          actions: filterBannedActions(fields.actions),
         };
       } catch (err) {
         console.warn('SW decrypt failed:', err);
       }
     }
     return {
-      title: data.topic ? `🔒 ${data.topic}` : 'Pigeon',
+      title: `🔒 ${data.topic}`,
       body: 'New encrypted message',
       topic: data.topic,
       id: data.id,
+      actions: [],
     };
   }
 
+  // Default title is the topic name (or the publisher's X-Title), never a
+  // generic "Pigeon". Default body is the message text.
   return {
-    title: data.title || data.topic || 'Pigeon',
+    title: data.title || data.topic || '',
     body: data.markdown ? stripMarkdown(data.message || '') : (data.message || ''),
     image: data.image || undefined,
     click: data.click || undefined,
     topic: data.topic,
     id: data.id,
+    actions: filterBannedActions(data.actions),
   };
+}
+
+// --- Installed-app hygiene (epic #34, child #37) --------------------------
+// The page tells the service worker which topic a window is currently viewing,
+// so a push for that topic can be folded into the already-visible stream
+// instead of being duplicated as an OS toast. The URL query string is the
+// fallback between navigation and the next postMessage.
+
+const activeTopicByClient = new Map(); // client id -> topic name
+
+self.addEventListener('message', (event) => {
+  const data = event.data;
+  if (!data || data.type !== 'active-topic' || !event.source || !event.source.id) return;
+  if (data.topic) activeTopicByClient.set(event.source.id, data.topic);
+  else activeTopicByClient.delete(event.source.id);
+});
+
+function activeTopicFor(client) {
+  if (client.id && activeTopicByClient.has(client.id)) return activeTopicByClient.get(client.id);
+  try {
+    return new URL(client.url).searchParams.get('topic');
+  } catch {
+    return null;
+  }
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+function arrayBufferToBase64Url(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Increments the home-screen badge when a push becomes an OS notification
+// while the page isn't running. The page owns the running copy of the sum and
+// persists it to IDB (unread_sum); the SW read-modify-writes it so the two
+// never blindly race each other.
+async function bumpUnreadBadge() {
+  if (!('setAppBadge' in self.navigator)) return;
+  try {
+    const prev = (await PigeonKeystore.getMeta('unread_sum')) || 0;
+    const next = prev + 1;
+    await PigeonKeystore.setMeta('unread_sum', next);
+    await self.navigator.setAppBadge(next);
+  } catch (err) {
+    console.warn('setAppBadge failed:', err);
+  }
+}
+
+// Unregister one topic's push row from the shade. This is NOT Chrome's
+// origin-wide Unsubscribe: it does not revoke the PushSubscription, and other
+// topics keep their rows. It never focuses the PWA — the whole point is to
+// make a noisy topic quieter without leaving the drawer.
+async function muteTopicFromNotification(notification) {
+  const topic = notification.data && notification.data.topic;
+  if (!topic) return;
+  try {
+    await PigeonKeystore.setTopicMuted(topic);
+
+    const sub = await self.registration.pushManager.getSubscription();
+    const endpoint = sub && sub.endpoint;
+    if (endpoint) {
+      try {
+        await fetch(`/${topic}/push/subscribe`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ endpoint }),
+        });
+      } catch (err) {
+        // Offline: hand the delete to the page's durable retry queue.
+        await PigeonKeystore.addPendingUnsub({ topic, endpoint }).catch(() => {});
+      }
+    }
+
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    clients.forEach(c => c.postMessage({ type: 'pigeon-topic-muted', topic }));
+  } catch (err) {
+    console.warn('Mute topic failed:', err);
+  }
 }
 
 self.addEventListener('push', (event) => {
@@ -140,33 +262,152 @@ self.addEventListener('push', (event) => {
 
   event.waitUntil((async () => {
     const n = await buildNotification(data);
+    const topic = n.topic || data.topic;
+
+    // A notification has to be useful and time-sensitive. If a focused window
+    // is already showing this topic, the message is on screen — don't also
+    // shout at the OS. Forward the payload so a lagging WebSocket can catch up.
+    const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const viewing = clientsList.some((c) => c.focused && topic && activeTopicFor(c) === topic);
+    if (viewing) {
+      for (const c of clientsList) {
+        c.postMessage({ type: 'push-forward', payload: data });
+      }
+      return;
+    }
+
+    // #44: never leave a blank toast for the on-device model to flag, and
+    // never fall back to a title that is only "Pigeon".
+    const title = n.title || n.topic || 'Message';
+    const body = n.body || n.topic || 'Message';
+
+    // #36: X-Priority now changes how the notification is delivered, not just
+    // the colour on the message card. Priorities 1-4 collapse per topic so a
+    // busy topic is a single toast that updates in place; priority 5 keeps a
+    // unique tag so an urgent alert can never overwrite (or be overwritten by)
+    // another. Default (no header) is 3 / normal.
+    const priority = (typeof data.priority === 'number' && data.priority >= 1 && data.priority <= 5)
+      ? data.priority
+      : 3;
+
+    const collapseTag = !topic
+      ? (n.id || undefined)
+      : (priority >= 5 ? `pigeon:${topic}:${n.id || 'urgent'}` : `pigeon:${topic}`);
+
     const options = {
-      body: n.body,
-      tag: n.id || undefined,
+      body,
+      tag: collapseTag,
       icon: '/icon-192.png',
       badge: '/badge.png',
       image: n.image,
-      data: { click: n.click, topic: n.topic },
+      data: { click: n.click, topic: n.topic, id: n.id, priority },
+      // Priority 4 re-alerts when a collapsed toast updates; priority 5 stays
+      // on screen until dismissed; priority 1 (min) is delivered silently so a
+      // "weekly report is ready" doesn't wake the radio.
+      renotify: priority >= 4,
+      requireInteraction: priority >= 5,
+      silent: priority <= 1,
     };
-    await self.registration.showNotification(n.title, options);
+    if (data.created_at) {
+      options.timestamp = data.created_at * 1000;
+    }
+
+    // Mute-this-topic is the reserved first action on every content
+    // notification. Feature-detect maxActions rather than UA-sniffing: Safari
+    // on iOS reports 0, where we just skip the button and keep the body tap.
+    if (isContentNotification(data) && typeof Notification !== 'undefined' && Notification.maxActions > 0) {
+      const actions = [{ action: 'pigeon-mute', title: 'Mute topic' }];
+      for (const a of n.actions) {
+        if (actions.length < Notification.maxActions) actions.push(a);
+        else break;
+      }
+      options.actions = actions;
+    }
+
+    await self.registration.showNotification(title, options);
+    await bumpUnreadBadge();
   })());
 });
 
 self.addEventListener('notificationclick', (event) => {
-  event.notification.close();
-  // X-Click is publisher-controlled. Some browsers historically allowed
-  // non-http(s) schemes through clients.openWindow; gate it here defensively.
-  const click = event.notification.data && event.notification.data.click;
-  let url = '/';
-  if (click) {
-    try {
-      const parsed = new URL(click, self.location.origin);
-      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-        url = parsed.href;
-      }
-    } catch {
-      // Fall back to root.
-    }
+  if (event.action === 'pigeon-mute') {
+    event.notification.close();
+    event.waitUntil(muteTopicFromNotification(event.notification));
+    return;
   }
-  event.waitUntil(clients.openWindow(url));
+
+  event.notification.close();
+  const data = event.notification.data || {};
+  const click = data.click;
+  const topic = data.topic;
+  const id = data.id;
+
+  event.waitUntil((async () => {
+    // X-Click is publisher-controlled. Some browsers historically allowed
+    // non-http(s) schemes through clients.openWindow; gate it here defensively.
+    if (click) {
+      try {
+        const parsed = new URL(click, self.location.origin);
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+          // Publisher intent wins for cross-origin clicks.
+          if (parsed.origin !== self.location.origin) {
+            return self.clients.openWindow(parsed.href);
+          }
+        }
+      } catch {
+        // Fall through to focusing the app.
+      }
+    }
+
+    // Otherwise focus an existing window and navigate it to the topic, instead
+    // of spawning a second window for every alert.
+    const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    if (clientsList.length > 0) {
+      const target = clientsList[0];
+      await target.focus();
+      target.postMessage({ type: 'open-topic', topic, id });
+      return;
+    }
+    return self.clients.openWindow(topic ? `/?topic=${encodeURIComponent(topic)}` : '/');
+  })());
+});
+
+// Endpoint rotation must not silently disable push. Resubscribe with the
+// cached VAPID key and re-register the new endpoint against every topic the
+// server still has a row for.
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil((async () => {
+    try {
+      const vapidKey = await PigeonKeystore.getMeta('vapid_key');
+      const registrations = (await PigeonKeystore.getMeta('push_registrations')) || [];
+      if (!vapidKey) {
+        console.warn('pushsubscriptionchange: no VAPID key cached; re-registration happens on next page load');
+        return;
+      }
+      const newSub = await self.registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(vapidKey),
+      });
+      for (const reg of registrations) {
+        if (!reg || !reg.topic) continue;
+        try {
+          await fetch(`/${encodeURIComponent(reg.topic)}/push/subscribe`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              endpoint: newSub.endpoint,
+              keys: {
+                p256dh: arrayBufferToBase64Url(newSub.getKey('p256dh')),
+                auth: arrayBufferToBase64Url(newSub.getKey('auth')),
+              },
+            }),
+          });
+        } catch (err) {
+          console.warn('Re-register push for topic failed:', reg.topic, err);
+        }
+      }
+    } catch (err) {
+      console.warn('pushsubscriptionchange handling failed:', err);
+    }
+  })());
 });
