@@ -371,6 +371,17 @@ function renderConnectionStatus() {
 window.addEventListener('online', renderConnectionStatus);
 window.addEventListener('offline', renderConnectionStatus);
 
+// Keep the service worker's suppress-when-focused view of the active topic
+// fresh as windows gain/lose focus and the page becomes visible again.
+window.addEventListener('focus', () => {
+  if (state.activeTopic) notifyServiceWorkerActiveTopic(state.activeTopic);
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && state.activeTopic) {
+    notifyServiceWorkerActiveTopic(state.activeTopic);
+  }
+});
+
 // Delegated click handler for any [data-action] element. Replaces the inline
 // `onclick="..."` attributes the rendered HTML used to carry — those were a
 // JS-injection surface (user-controlled fields templated into a JS string
@@ -518,6 +529,7 @@ async function init() {
 
   if ('serviceWorker' in navigator) {
     await navigator.serviceWorker.register('/sw.js');
+    navigator.serviceWorker.addEventListener('message', handleServiceWorkerMessage);
 
     const reg = await navigator.serviceWorker.ready;
     const existing = await reg.pushManager.getSubscription();
@@ -526,6 +538,17 @@ async function init() {
     if (existing && pushPrefEnabled()) {
       state.pushEnabled = true;
       state.pushSubscription = existing;
+      // Cache the VAPID key in IDB so the service worker can resubscribe on
+      // endpoint rotation (pushsubscriptionchange) without a page load.
+      PigeonKeystore.getMeta('vapid_key').then(async (cached) => {
+        if (cached) return;
+        try {
+          const resp = await apiFetch('/vapid-key');
+          await PigeonKeystore.setMeta('vapid_key', await resp.text());
+        } catch (err) {
+          console.warn('Failed to cache VAPID key:', err);
+        }
+      });
       // Re-register push for all topics (idempotent via INSERT OR REPLACE on server)
       Promise.all(
         state.topics.map(topic => registerPushForTopic(topic, existing))
@@ -800,6 +823,7 @@ async function connectTopic(topic) {
       } else if (newEarly > 0) {
         state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + newEarly;
         renderTopicTabs();
+        updateAppBadge();
       }
 
       // A publisher can POST immediately after the subscribe UI becomes,
@@ -827,6 +851,7 @@ async function connectTopic(topic) {
               else {
                 state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + recovered;
                 renderTopicTabs();
+                updateAppBadge();
               }
             } else if (attempt < 4 && state.messages[topic].length === 0) {
               // D1 visibility and the WebSocket upgrade can each trail the
@@ -907,6 +932,7 @@ async function connectTopic(topic) {
       } else if (!isTodoMarker(msg)) {
         state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + 1;
         renderTopicTabs();
+        updateAppBadge();
       }
     } catch (err) {
       console.warn('Dropping malformed message:', err);
@@ -991,6 +1017,8 @@ function selectTopic(topic) {
   renderTopicTabs();
   renderMessages();
   syncUrl();
+  notifyServiceWorkerActiveTopic(topic);
+  updateAppBadge();
 }
 
 // Unsubscribing from an encrypted topic destroys the only copy of its
@@ -2528,6 +2556,9 @@ function loadPushRegistrations() {
 
 function savePushRegistrations(list) {
   localStorage.setItem(PUSH_REGISTRATIONS_KEY, JSON.stringify(list));
+  // Mirror to IDB so the service worker can re-register every topic after an
+  // endpoint rotation (pushsubscriptionchange) without a page load.
+  PigeonKeystore.setMeta('push_registrations', list).catch(() => {});
 }
 
 function rememberPushRegistration(topic, endpoint) {
@@ -2801,6 +2832,9 @@ async function enablePush() {
     const reg = await navigator.serviceWorker.ready;
     const vapidKeyResponse = await apiFetch('/vapid-key');
     const vapidKey = await vapidKeyResponse.text();
+    // Cache the key in IDB so the service worker can resubscribe on endpoint
+    // rotation without a page load.
+    PigeonKeystore.setMeta('vapid_key', vapidKey).catch(() => {});
 
     const subscription = await reg.pushManager.subscribe({
       userVisibleOnly: true,
@@ -2903,6 +2937,88 @@ window.addEventListener('storage', async (e) => {
   }
   renderPushState();
 });
+
+// ---------------------------------------------------------------------------
+// Installed-app notification hygiene (epic #34, child #37)
+//
+// The service worker posts two kinds of messages to the page: a request to
+// open a topic (from a notification click), and a forwarded payload (when a
+// push was suppressed because the topic is already on screen). Both feed the
+// same in-memory state the WebSocket uses, so nothing is duplicated.
+// ---------------------------------------------------------------------------
+
+function handleServiceWorkerMessage(event) {
+  const data = event.data;
+  if (!data || !data.type) return;
+  if (data.type === 'open-topic') {
+    openTopicFromNotification(data.topic, data.id);
+  } else if (data.type === 'push-forward') {
+    ingestPushForwarded(data.payload);
+  }
+}
+
+// Focus-and-navigate without spawning a second window: the notification click
+// lands here when a window was already open.
+function openTopicFromNotification(topic, id) {
+  if (!topic || !state.topics.includes(topic)) return;
+  selectTopic(topic);
+  if (id) {
+    const card = messagesList.querySelector(`.message-card[data-msg-id="${cssValue(id)}"]`);
+    if (card) card.scrollIntoView({ block: 'center' });
+  }
+}
+
+// Merges a payload the service worker forwarded instead of showing as an OS
+// toast (suppressed because the topic was already visible). Dedupes by id so a
+// WebSocket delivery of the same message never double-counts.
+async function ingestPushForwarded(payload) {
+  if (!payload || typeof payload !== 'object') return;
+  const topic = payload.topic;
+  if (!topic || !state.topics.includes(topic)) return;
+  if (!state.messages[topic]) state.messages[topic] = [];
+  const msg = { ...payload };
+  // Encrypted push payloads ship the envelope as `ct`; the page decrypt path
+  // reads `message`.
+  if (msg.encrypted && msg.ct != null && msg.message == null) {
+    msg.message = msg.ct;
+  }
+  delete msg.ct;
+  await tryDecryptMessage(topic, msg);
+  if (!msg.id || state.messages[topic].some((m) => m.id === msg.id)) return;
+  insertMessage(topic, msg);
+  cacheTopicMessages(topic);
+  if (state.activeTopic === topic) {
+    renderMessages();
+  } else {
+    state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + 1;
+    renderTopicTabs();
+    updateAppBadge();
+  }
+}
+
+// Tells the controlling service worker which topic this window is viewing, so
+// it can suppress the OS toast for a message that's already on screen.
+function notifyServiceWorkerActiveTopic(topic) {
+  if (!('serviceWorker' in navigator)) return;
+  const controller = navigator.serviceWorker.controller;
+  if (controller) controller.postMessage({ type: 'active-topic', topic: topic || null });
+}
+
+// Keeps the home-screen badge in step with the in-app unread count, and
+// persists the sum to IDB so the service worker can read-modify-write it for
+// pushes that arrive while the page is closed.
+async function updateAppBadge() {
+  const sum = Object.keys(state.unreadCounts)
+    .reduce((total, topic) => total + (state.unreadCounts[topic] || 0), 0);
+  PigeonKeystore.setMeta('unread_sum', sum).catch(() => {});
+  if (!('setAppBadge' in navigator)) return;
+  try {
+    if (sum > 0) await navigator.setAppBadge(sum);
+    else await navigator.clearAppBadge();
+  } catch (err) {
+    console.warn('Updating the app badge failed:', err);
+  }
+}
 
 // Helpers
 // GitHub-style shortcode → emoji. Unknown shortcodes fall through unchanged.

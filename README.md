@@ -84,6 +84,20 @@ load and whenever the network comes back; the button reports that cleanup is
 still pending. Unsubscribing from a single topic unregisters push for that topic
 the same way.
 
+### Installed-app notifications
+
+When the PWA is open (installed or sitting in a tab), push delivery respects
+what's already on screen:
+
+- A message for the topic you're currently viewing doesn't also raise an OS
+  toast — it's already in the list.
+- Tapping a notification for another topic focuses the existing window and
+  opens that topic, instead of spawning a second window.
+- The home-screen icon shows an unread-count badge (Chromium desktop/Android
+  and installed iOS 16.4+ PWAs); it clears as you read.
+- If Chrome rotates the push endpoint, the service worker resubscribes and
+  re-registers every topic automatically, so push doesn't silently stop.
+
 ### Todo lists
 
 Any topic can act as a todo list — no special endpoint, just a tag convention. Publish a message with the `todo` tag and the UI renders it with a checkbox:

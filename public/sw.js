@@ -130,6 +130,62 @@ async function buildNotification(data) {
   };
 }
 
+// --- Installed-app hygiene (epic #34, child #37) --------------------------
+// The page tells the service worker which topic a window is currently viewing,
+// so a push for that topic can be folded into the already-visible stream
+// instead of being duplicated as an OS toast. The URL query string is the
+// fallback between navigation and the next postMessage.
+
+const activeTopicByClient = new Map(); // client id -> topic name
+
+self.addEventListener('message', (event) => {
+  const data = event.data;
+  if (!data || data.type !== 'active-topic' || !event.source || !event.source.id) return;
+  if (data.topic) activeTopicByClient.set(event.source.id, data.topic);
+  else activeTopicByClient.delete(event.source.id);
+});
+
+function activeTopicFor(client) {
+  if (client.id && activeTopicByClient.has(client.id)) return activeTopicByClient.get(client.id);
+  try {
+    return new URL(client.url).searchParams.get('topic');
+  } catch {
+    return null;
+  }
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+function arrayBufferToBase64Url(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Increments the home-screen badge when a push becomes an OS notification
+// while the page isn't running. The page owns the running copy of the sum and
+// persists it to IDB (unread_sum); the SW read-modify-writes it so the two
+// never blindly race each other.
+async function bumpUnreadBadge() {
+  if (!('setAppBadge' in self.navigator)) return;
+  try {
+    const prev = (await PigeonKeystore.getMeta('unread_sum')) || 0;
+    const next = prev + 1;
+    await PigeonKeystore.setMeta('unread_sum', next);
+    await self.navigator.setAppBadge(next);
+  } catch (err) {
+    console.warn('setAppBadge failed:', err);
+  }
+}
+
 self.addEventListener('push', (event) => {
   let data = {};
   try {
@@ -140,33 +196,106 @@ self.addEventListener('push', (event) => {
 
   event.waitUntil((async () => {
     const n = await buildNotification(data);
+    const topic = n.topic || data.topic;
+
+    // A notification has to be useful and time-sensitive. If a focused window
+    // is already showing this topic, the message is on screen — don't also
+    // shout at the OS. Forward the payload so a lagging WebSocket can catch up.
+    const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const viewing = clientsList.some((c) => c.focused && topic && activeTopicFor(c) === topic);
+    if (viewing) {
+      for (const c of clientsList) {
+        c.postMessage({ type: 'push-forward', payload: data });
+      }
+      return;
+    }
+
     const options = {
       body: n.body,
       tag: n.id || undefined,
       icon: '/icon-192.png',
       badge: '/badge.png',
       image: n.image,
-      data: { click: n.click, topic: n.topic },
+      data: { click: n.click, topic: n.topic, id: n.id },
     };
     await self.registration.showNotification(n.title, options);
+    await bumpUnreadBadge();
   })());
 });
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  // X-Click is publisher-controlled. Some browsers historically allowed
-  // non-http(s) schemes through clients.openWindow; gate it here defensively.
-  const click = event.notification.data && event.notification.data.click;
-  let url = '/';
-  if (click) {
-    try {
-      const parsed = new URL(click, self.location.origin);
-      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-        url = parsed.href;
+  const data = event.notification.data || {};
+  const click = data.click;
+  const topic = data.topic;
+  const id = data.id;
+
+  event.waitUntil((async () => {
+    // X-Click is publisher-controlled. Some browsers historically allowed
+    // non-http(s) schemes through clients.openWindow; gate it here defensively.
+    if (click) {
+      try {
+        const parsed = new URL(click, self.location.origin);
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+          // Publisher intent wins for cross-origin clicks.
+          if (parsed.origin !== self.location.origin) {
+            return self.clients.openWindow(parsed.href);
+          }
+        }
+      } catch {
+        // Fall through to focusing the app.
       }
-    } catch {
-      // Fall back to root.
     }
-  }
-  event.waitUntil(clients.openWindow(url));
+
+    // Otherwise focus an existing window and navigate it to the topic, instead
+    // of spawning a second window for every alert.
+    const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    if (clientsList.length > 0) {
+      const target = clientsList[0];
+      await target.focus();
+      target.postMessage({ type: 'open-topic', topic, id });
+      return;
+    }
+    return self.clients.openWindow(topic ? `/?topic=${encodeURIComponent(topic)}` : '/');
+  })());
+});
+
+// Endpoint rotation must not silently disable push. Resubscribe with the
+// cached VAPID key and re-register the new endpoint against every topic the
+// server still has a row for.
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil((async () => {
+    try {
+      const vapidKey = await PigeonKeystore.getMeta('vapid_key');
+      const registrations = (await PigeonKeystore.getMeta('push_registrations')) || [];
+      if (!vapidKey) {
+        console.warn('pushsubscriptionchange: no VAPID key cached; re-registration happens on next page load');
+        return;
+      }
+      const newSub = await self.registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(vapidKey),
+      });
+      for (const reg of registrations) {
+        if (!reg || !reg.topic) continue;
+        try {
+          await fetch(`/${encodeURIComponent(reg.topic)}/push/subscribe`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              endpoint: newSub.endpoint,
+              keys: {
+                p256dh: arrayBufferToBase64Url(newSub.getKey('p256dh')),
+                auth: arrayBufferToBase64Url(newSub.getKey('auth')),
+              },
+            }),
+          });
+        } catch (err) {
+          console.warn('Re-register push for topic failed:', reg.topic, err);
+        }
+      }
+    } catch (err) {
+      console.warn('pushsubscriptionchange handling failed:', err);
+    }
+  })());
 });

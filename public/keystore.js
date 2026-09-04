@@ -5,13 +5,17 @@
 // (not localStorage) because Service Workers cannot read localStorage but can
 // read IndexedDB.
 //
-// Records: { topic (key), passphrase, salt, iter, e2ee: true }
+// Records:
+//   topic_keys      { topic (key), passphrase, salt, iter, e2ee: true }
+//   topic_messages  { topic (key), messages, updatedAt }
+//   meta            { key (key), value } — vapid_key, push_registrations, unread_sum
 
 (function (root) {
   const DB_NAME = 'pigeon';
-  const DB_VERSION = 2;
+  const DB_VERSION = 3;
   const STORE_KEYS = 'topic_keys';
   const STORE_MESSAGES = 'topic_messages';
+  const STORE_META = 'meta';
 
   function open() {
     return new Promise((resolve, reject) => {
@@ -23,6 +27,9 @@
         }
         if (!db.objectStoreNames.contains(STORE_MESSAGES)) {
           db.createObjectStore(STORE_MESSAGES, { keyPath: 'topic' });
+        }
+        if (!db.objectStoreNames.contains(STORE_META)) {
+          db.createObjectStore(STORE_META, { keyPath: 'key' });
         }
       };
       req.onsuccess = () => resolve(req.result);
@@ -90,8 +97,35 @@
     db.close();
   }
 
+  async function setMeta(key, value) {
+    const db = await open();
+    const tx = db.transaction(STORE_META, 'readwrite');
+    tx.objectStore(STORE_META).put({ key, value });
+    await txPromise(tx);
+    db.close();
+  }
+
+  async function getMeta(key) {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_META, 'readonly');
+      const req = tx.objectStore(STORE_META).get(key);
+      req.onsuccess = () => { db.close(); resolve(req.result ? req.result.value : null); };
+      req.onerror = () => { db.close(); reject(req.error); };
+    });
+  }
+
+  async function deleteMeta(key) {
+    const db = await open();
+    const tx = db.transaction(STORE_META, 'readwrite');
+    tx.objectStore(STORE_META).delete(key);
+    await txPromise(tx);
+    db.close();
+  }
+
   root.PigeonKeystore = {
     putTopicKey, getTopicKey, deleteTopicKey,
     putTopicMessages, getTopicMessages, deleteTopicMessages,
+    setMeta, getMeta, deleteMeta,
   };
 })(typeof self !== 'undefined' ? self : window);
