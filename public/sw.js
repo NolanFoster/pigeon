@@ -281,14 +281,36 @@ self.addEventListener('push', (event) => {
     const title = n.title || n.topic || 'Message';
     const body = n.body || n.topic || 'Message';
 
+    // #36: X-Priority now changes how the notification is delivered, not just
+    // the colour on the message card. Priorities 1-4 collapse per topic so a
+    // busy topic is a single toast that updates in place; priority 5 keeps a
+    // unique tag so an urgent alert can never overwrite (or be overwritten by)
+    // another. Default (no header) is 3 / normal.
+    const priority = (typeof data.priority === 'number' && data.priority >= 1 && data.priority <= 5)
+      ? data.priority
+      : 3;
+
+    const collapseTag = !topic
+      ? (n.id || undefined)
+      : (priority >= 5 ? `pigeon:${topic}:${n.id || 'urgent'}` : `pigeon:${topic}`);
+
     const options = {
       body,
-      tag: n.id || undefined,
+      tag: collapseTag,
       icon: '/icon-192.png',
       badge: '/badge.png',
       image: n.image,
-      data: { click: n.click, topic: n.topic, id: n.id },
+      data: { click: n.click, topic: n.topic, id: n.id, priority },
+      // Priority 4 re-alerts when a collapsed toast updates; priority 5 stays
+      // on screen until dismissed; priority 1 (min) is delivered silently so a
+      // "weekly report is ready" doesn't wake the radio.
+      renotify: priority >= 4,
+      requireInteraction: priority >= 5,
+      silent: priority <= 1,
     };
+    if (data.created_at) {
+      options.timestamp = data.created_at * 1000;
+    }
 
     // Mute-this-topic is the reserved first action on every content
     // notification. Feature-detect maxActions rather than UA-sniffing: Safari

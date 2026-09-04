@@ -47,6 +47,28 @@ curl -H "X-Markdown: 1" \
 | `X-Click` | URL to open on notification click | — |
 | `X-Markdown` | Set to `1` to enable markdown rendering | 0 |
 
+### Priority and delivery
+
+`X-Priority` isn't just cosmetic — it changes how the push service delivers the
+message (RFC 8030 `Urgency`/`TTL`) and how the toast behaves on the device.
+Default (no header) is **3 / normal**. Previously every message was sent with
+`Urgency: high` and `TTL: 86400`; that is now reserved for priorities 4–5.
+
+| `X-Priority` | Meaning | Urgency | TTL | Collapse | On-device |
+|--------------|---------|---------|-----|----------|-----------|
+| 1 | min | `very-low` | 1h | per topic | silent |
+| 2 | low | `low` | 1h | per topic | — |
+| 3 | default | `normal` | 4h | per topic | — |
+| 4 | high | `high` | 10m | per topic | re-alert (`renotify`) |
+| 5 | max / urgent | `high` | 2m | never | stays on screen (`requireInteraction`) |
+
+Priorities 1–4 share a per-topic collapse key, so a busy topic is a single toast
+that updates in place (like ntfy). Priority 5 keeps a unique tag so an urgent
+alert can never overwrite another. The RFC 8030 `Topic` header sent to the push
+service is a truncated SHA-256 hash of the topic name, never the raw name — the
+header is unencrypted and must not leak a capability-URL topic to the push
+service.
+
 ### API
 
 | Method | Path | Description |
