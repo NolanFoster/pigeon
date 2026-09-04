@@ -72,6 +72,13 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         }
     }
 
+    // #44 / #38: when the X-Actions publisher-header lands here, reject any
+    // action label that case-insensitively matches
+    //   ^(allow|verify|confirm|unsubscribe|click here|ok|continue|claim)$
+    // with a 400 (same class as `javascript:` click URLs). Chrome on Android
+    // runs an on-device model over action labels; a permission-prompt-looking
+    // button can get the whole origin flagged or its grant revoked. The
+    // Service Worker applies the same reject-list after E2EE decrypt.
     let body = req.text().await?;
     if body.len() > max_body {
         return Response::error("Payload Too Large", 413);

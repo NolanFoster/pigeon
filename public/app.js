@@ -25,6 +25,9 @@ const state = {
   // filter never leaks across topic switches; the URL mirrors it so a
   // filtered view can be shared and restored after reload.
   filterTags: new Map(),
+  // Topics muted from the notification shade ("Mute topic"). Mirrors the IDB
+  // store so the tab can show Muted without a reload.
+  mutedTopics: new Set(),
 };
 
 // fetch() resolves for 4xx/5xx, so a bare `await fetch(...)` inside a try block
@@ -535,7 +538,12 @@ async function init() {
     const existing = await reg.pushManager.getSubscription();
     migratePushPref(!!existing);
 
-    if (existing && pushPrefEnabled()) {
+    const want = pushPrefEnabled();
+    const perm = 'Notification' in window ? Notification.permission : 'default';
+
+    if (existing && want) {
+      // Happy path: enabled. Re-register push for all topics (idempotent via
+      // INSERT OR REPLACE on server).
       state.pushEnabled = true;
       state.pushSubscription = existing;
       // Cache the VAPID key in IDB so the service worker can resubscribe on
@@ -549,22 +557,44 @@ async function init() {
           console.warn('Failed to cache VAPID key:', err);
         }
       });
-      // Re-register push for all topics (idempotent via INSERT OR REPLACE on server)
       Promise.all(
         state.topics.map(topic => registerPushForTopic(topic, existing))
       ).catch(err => console.error('Push re-registration failed:', err));
+    } else if (want && perm === 'granted' && !existing) {
+      // Endpoint rotation / ITP: silently re-subscribe (#37 / #42).
+      pushStartup = silentResubscribe()
+        .catch(err => console.error('Silent resubscribe failed:', err));
     } else if (existing) {
-      // Push is off but a live subscription is still out there — a teardown
-      // that was interrupted, or one the browser undid. Every reload used to
-      // re-register it, which is what made disabling feel impossible. Finish
-      // the job instead.
+      // Push is off but a live subscription is still out there. If we still owe
+      // the server deletes it's an interrupted teardown — finish it. If not,
+      // it's Chrome Undo of a shade unsubscribe: stay off and offer Enable Push
+      // rather than silently re-registering (#44 §1).
+      if (hasUnfinishedPushCleanup(existing.endpoint)) {
+        pushStartup = teardownPush(existing)
+          .catch(err => console.error('Resuming push teardown failed:', err));
+      } else {
+        state.pushEnabled = false;
+        state.pushSubscription = null;
+        pushStartup = Promise.resolve();
+        showPushUndoBanner();
+      }
+    } else if (want && perm === 'denied') {
+      // Shade unsubscribe happened while the app was closed: run the durable
+      // off switch so the server stops fanning out to the dead grant.
       pushStartup = teardownPush(existing)
-        .catch(err => console.error('Resuming push teardown failed:', err));
+        .then(() => showToast('Notifications were turned off in Chrome.'))
+        .catch(err => console.error('Push teardown failed:', err));
+    } else if (want && perm === 'default') {
+      // Safety Check auto-revoke: keep want, button shows Restore notifications.
+      state.pushEnabled = false;
+      state.pushSubscription = null;
     }
   }
 
-  // Anything the server never acknowledged gets another try on every load.
+  // Anything the server never acknowledged gets another try on every load —
+  // both the page's own queue and deletes the Service Worker queued in IDB.
   pushStartup
+    .then(absorbServiceWorkerPendingUnsubs)
     .then(flushPendingUnsubs)
     .catch(err => console.error('Unsubscribe retry failed:', err))
     .finally(renderPushState);
@@ -573,6 +603,14 @@ async function init() {
 
   // Derive encryption keys for any e2ee topics whose passphrase is in IDB
   await Promise.all(state.topics.filter(isE2eeTopic).map(loadTopicKey));
+
+  // Topics muted from the shade show "Muted" on their tab (#44).
+  try {
+    const muted = await PigeonKeystore.getMutedTopics();
+    state.mutedTopics = new Set((muted || []).map(r => r && r.topic).filter(Boolean));
+  } catch (err) {
+    console.warn('Could not load muted topics:', err);
+  }
 
   state.topics.forEach(topic => connectTopic(topic));
   renderTopicTabs();
@@ -1117,6 +1155,7 @@ function buildTopicTab(topic) {
   const active = topic === state.activeTopic;
   const encrypted = isE2eeTopic(topic);
   const unread = (state.unreadCounts && state.unreadCounts[topic]) || 0;
+  const muted = state.mutedTopics.has(topic);
 
   const wrap = document.createElement('div');
   wrap.className = `topic-tab${active ? ' active' : ''}`;
@@ -1135,7 +1174,7 @@ function buildTopicTab(topic) {
   select.dataset.action = 'select-topic';
   select.dataset.topic = topic;
   select.setAttribute('aria-label',
-    `${topic}${encrypted ? ', end-to-end encrypted' : ''}${unread ? `, ${unread} unread` : ''}`);
+    `${topic}${encrypted ? ', end-to-end encrypted' : ''}${unread ? `, ${unread} unread` : ''}${muted ? ', muted' : ''}`);
 
   if (encrypted) {
     const lock = document.createElement('span');
@@ -1156,6 +1195,14 @@ function buildTopicTab(topic) {
     badge.setAttribute('aria-hidden', 'true');
     badge.textContent = String(unread);
     select.appendChild(badge);
+  }
+
+  if (muted) {
+    const mutedBadge = document.createElement('span');
+    mutedBadge.className = 'topic-muted-badge';
+    mutedBadge.setAttribute('aria-hidden', 'true');
+    mutedBadge.textContent = 'Muted';
+    select.appendChild(mutedBadge);
   }
 
   const remove = document.createElement('button');
@@ -2731,32 +2778,149 @@ async function teardownPush(subscription) {
   state.pushEnabled = false;
   state.pushSubscription = null;
 
-  const endpoint = subscription && subscription.endpoint;
-  if (!endpoint) return { serverOk: true, browserOk: true };
+  // Every endpoint this browser ever told the server about — the current
+  // subscription plus any the browser rotated away from. When Chrome revokes
+  // the grant from the shade, getSubscription() may already return null, so
+  // the current subscription alone is not enough to clear the server rows.
+  const endpoints = new Set(loadPushRegistrations().map(r => r.endpoint));
+  if (subscription && subscription.endpoint) endpoints.add(subscription.endpoint);
 
-  const serverOk = await unregisterPushEverywhere(endpoint);
+  let serverOk = true;
+  for (const endpoint of endpoints) {
+    serverOk = (await unregisterPushEverywhere(endpoint)) && serverOk;
+  }
 
   let browserOk = true;
-  try {
-    // The decisive step: once the endpoint is gone the push service rejects
-    // further deliveries with 410, which also prunes any server row a failed
-    // DELETE left behind.
-    browserOk = (await subscription.unsubscribe()) !== false;
-  } catch (err) {
-    console.error('pushManager.unsubscribe() failed:', err);
-    browserOk = false;
+  if (subscription && subscription.endpoint) {
+    try {
+      // The decisive step: once the endpoint is gone the push service rejects
+      // further deliveries with 410, which also prunes any server row a failed
+      // DELETE left behind.
+      browserOk = (await subscription.unsubscribe()) !== false;
+    } catch (err) {
+      console.error('pushManager.unsubscribe() failed:', err);
+      browserOk = false;
+    }
   }
 
   return { serverOk, browserOk };
 }
 
-// Push has three states, not two: not enabled, enabled, and blocked at the OS
-// or browser level. The blocked state used to be invisible — denying the
-// permission left the button reading "Enable Push Notifications" forever.
+// Push states (#44): enabled, "Restore notifications" (Safety Check revoked
+// the grant but the user still wants push), and off. Chrome's one-tap
+// Unsubscribe is treated as off, not as a "blocked, go re-open Settings" prompt.
 function setPushHint(message) {
   if (!pushHint) return;
   pushHint.textContent = message || '';
   pushHint.hidden = !message;
+}
+
+// Does this endpoint still owe the server a delete? Used to tell an
+// interrupted teardown (we still have rows to clear) apart from a Chrome Undo
+// of a shade unsubscribe (fresh endpoint, nothing owed) — both arrive as
+// "push is off but a subscription exists".
+function hasUnfinishedPushCleanup(endpoint) {
+  if (loadPendingUnsubs().some(e => e.endpoint === endpoint)) return true;
+  return loadPushRegistrations().some(r => r.endpoint === endpoint);
+}
+
+// Endpoint rotation / ITP (#37/#42): permission is still granted and the user
+// still wants push, but the subscription vanished. Re-subscribe silently — no
+// requestPermission, since the grant is already there.
+async function silentResubscribe() {
+  if (!pushPrefEnabled() || Notification.permission !== 'granted') return;
+  const reg = await navigator.serviceWorker.ready;
+  const vapidKeyResponse = await apiFetch('/vapid-key');
+  const vapidKey = await vapidKeyResponse.text();
+  const subscription = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(vapidKey),
+  });
+  state.pushSubscription = subscription;
+  state.pushEnabled = true;
+  await Promise.all(state.topics.map(topic => registerPushForTopic(topic, subscription)));
+  renderPushState();
+}
+
+// Chrome Undo of a shade unsubscribe (or the user re-allowing in Settings
+// without us): permission is back but the durable off switch still wins. Offer
+// Enable Push without silently re-registering.
+function showPushUndoBanner() {
+  showToast('Chrome still allows notifications. Enable Push to resume.', {
+    duration: 0,
+    actionLabel: 'Enable Push',
+    onAction: () => enablePush(),
+  });
+}
+
+// The permission decision table (#44 §1). Runs on load, on visibility, and on
+// the permissions API change event. Idempotent: every branch converges on a
+// stable state, so a stray re-run is harmless.
+async function reconcilePushPermission() {
+  if (state.pushBusy) return;
+  if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) return;
+
+  const perm = Notification.permission;
+  const want = pushPrefEnabled();
+  let subscription = null;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    subscription = await reg.pushManager.getSubscription();
+  } catch (err) {
+    console.error('Reading push subscription failed:', err);
+    return;
+  }
+
+  if (perm === 'denied') {
+    // Shade Unsubscribe or Settings → Block is Disable Push, not a recovery
+    // prompt. Tear down immediately; every push sent after Unsubscribe counts
+    // against Chrome's rate limits.
+    if (want) {
+      await teardownPush(subscription).catch(err => console.error('Push teardown failed:', err));
+      showToast('Notifications were turned off in Chrome.');
+    }
+  } else if (perm === 'default') {
+    // Safety Check auto-revoke (#42): keep want, drop the live state so the
+    // button offers Restore notifications. Never requestPermission here.
+    if (want) {
+      state.pushEnabled = false;
+      state.pushSubscription = null;
+    }
+  } else if (perm === 'granted') {
+    if (subscription) {
+      if (want) {
+        state.pushSubscription = subscription;
+        state.pushEnabled = true;
+      } else {
+        // Chrome Undo of Unsubscribe, or re-allowed in Settings without us.
+        // Stay off; the banner offers Enable Push.
+        state.pushEnabled = false;
+        state.pushSubscription = null;
+        showPushUndoBanner();
+      }
+    } else if (want) {
+      // Endpoint rotation / ITP: silently re-subscribe.
+      await silentResubscribe();
+    }
+  }
+  renderPushState();
+}
+
+// The Service Worker can't write localStorage, so an offline mute/teardown
+// queues its deletes in IDB. Absorb them into the page's durable retry queue.
+async function absorbServiceWorkerPendingUnsubs() {
+  try {
+    const entries = await PigeonKeystore.getPendingUnsubs();
+    if (!entries || entries.length === 0) return;
+    for (const entry of entries) {
+      if (entry && entry.endpoint) {
+        queuePendingUnsub({ topic: entry.topic || null, endpoint: entry.endpoint });
+      }
+    }
+    await PigeonKeystore.clearPendingUnsubs();
+  } catch (err) {
+    console.warn('Could not absorb service-worker pending unsubs:', err);
+  }
 }
 
 function renderPushState() {
@@ -2779,6 +2943,8 @@ function renderPushState() {
   }
 
   const pendingCleanup = loadPendingUnsubs().length > 0;
+  const perm = Notification.permission;
+  const want = pushPrefEnabled();
 
   if (state.pushEnabled) {
     // The button is the off switch, not a status badge — it stays clickable.
@@ -2789,22 +2955,32 @@ function renderPushState() {
     return;
   }
 
-  if (Notification.permission === 'denied') {
-    enablePushBtn.disabled = true;
-    enablePushBtn.textContent = 'Push Blocked';
+  // Safety Check auto-revoke (#42): permission went back to "default" but the
+  // user still wants push. That is Chrome tidying, not the user leaving — keep
+  // `want` and offer restore, requesting permission only from that click.
+  if (want && perm === 'default') {
+    enablePushBtn.disabled = false;
+    enablePushBtn.textContent = 'Restore notifications';
     enablePushBtn.classList.remove('enabled');
-    setPushHint('Notifications are blocked for this site. Re-enable them in your browser\'s site settings, then reload.');
+    setPushHint('Chrome cleared this site\'s notification permission. Restore to keep receiving pushes.');
     return;
   }
 
+  // Every other off state. Chrome's one-tap Unsubscribe is Disable Push, not a
+  // blocked-recovery prompt: the button is the same Enable Push, and the hint
+  // names what happened without begging the user to re-open Settings.
   enablePushBtn.disabled = false;
   enablePushBtn.textContent = 'Enable Push Notifications';
   enablePushBtn.classList.remove('enabled');
-  // Delivery already stopped when the subscription went away; this is only
-  // about the server rows the retry queue is still working through.
-  setPushHint(pendingCleanup
-    ? 'Push is off on this device. Still clearing it on the server — this retries automatically.'
-    : '');
+  if (perm === 'denied') {
+    setPushHint('Notifications were turned off in Chrome.');
+  } else if (pendingCleanup) {
+    // Delivery already stopped when the subscription went away; this is only
+    // about the server rows the retry queue is still working through.
+    setPushHint('Push is off on this device. Still clearing it on the server — this retries automatically.');
+  } else {
+    setPushHint('');
+  }
 }
 
 // iOS only exposes Web Push to a PWA installed to the Home Screen.
@@ -2913,7 +3089,10 @@ enablePushBtn.addEventListener('click', () => {
 
 // A disable that failed offline is retried as soon as there's a network again.
 window.addEventListener('online', () => {
-  flushPendingUnsubs().then(renderPushState).catch(err => console.error('Unsubscribe retry failed:', err));
+  absorbServiceWorkerPendingUnsubs()
+    .then(flushPendingUnsubs)
+    .then(renderPushState)
+    .catch(err => console.error('Unsubscribe retry failed:', err));
 });
 
 // Disabling in one tab has to disable in all of them — a second tab still
@@ -2938,6 +3117,24 @@ window.addEventListener('storage', async (e) => {
   renderPushState();
 });
 
+// #44: observe permission flips so Chrome's one-tap Unsubscribe (or Safety
+// Check auto-revoke) is reflected without a reload. Never call
+// requestPermission from these handlers.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') reconcilePushPermission();
+});
+
+if ('permissions' in navigator && typeof navigator.permissions.query === 'function') {
+  navigator.permissions.query({ name: 'notifications' }).then((status) => {
+    if (status && typeof status.addEventListener === 'function') {
+      status.addEventListener('change', () => reconcilePushPermission());
+    }
+  }).catch(() => {
+    // Safari throws a TypeError for 'notifications'; the load/visibility
+    // observation points still cover it.
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Installed-app notification hygiene (epic #34, child #37)
 //
@@ -2954,6 +3151,12 @@ function handleServiceWorkerMessage(event) {
     openTopicFromNotification(data.topic, data.id);
   } else if (data.type === 'push-forward') {
     ingestPushForwarded(data.payload);
+  } else if (data.type === 'pigeon-topic-muted') {
+    // The Service Worker set a per-topic mute from the shade (#44).
+    if (data.topic) {
+      state.mutedTopics.add(data.topic);
+      renderTopicTabs();
+    }
   }
 }
 

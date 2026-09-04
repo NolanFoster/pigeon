@@ -87,6 +87,35 @@ function stripMarkdown(text) {
     .trim();
 }
 
+// ---------------------------------------------------------------------------
+// Honest-copy guards (#44). Chrome on Android runs an on-device model over
+// notification titles, bodies, and action labels. Publisher action labels that
+// read like permission prompts ("Allow", "Verify", "Click here", …) are dropped
+// so a spammy topic can't get the whole origin flagged. The server rejects the
+// same labels at parse time; this is the decrypt-side guard for E2EE topics.
+// ---------------------------------------------------------------------------
+const BANNED_ACTION_LABELS = /^(allow|verify|confirm|unsubscribe|click here|ok|continue|claim)$/i;
+
+function normalizeActionLabel(label) {
+  return String(label || '').trim().replace(/\s+/g, ' ');
+}
+
+function isBannedActionLabel(label) {
+  return BANNED_ACTION_LABELS.test(normalizeActionLabel(label));
+}
+
+function filterBannedActions(actions) {
+  if (!Array.isArray(actions)) return [];
+  return actions.filter(a => a && !isBannedActionLabel(a.title || a.label));
+}
+
+// A content notification is anything the publisher meant the user to see.
+// Control-plane closes (#43) are `message_clear` / `message_delete` and must
+// not grow a "Mute topic" button.
+function isContentNotification(data) {
+  return !data || (data.event !== 'message_clear' && data.event !== 'message_delete');
+}
+
 async function buildNotification(data) {
   // If the server flagged this as encrypted, try to decrypt with the stored
   // topic key. On any failure, fall back to a generic notification so the
@@ -101,32 +130,37 @@ async function buildNotification(data) {
         const key = await PigeonCrypto.deriveKey(rec.passphrase, envelope.kdf.salt, envelope.kdf.iter);
         const fields = await PigeonCrypto.decryptEnvelope(key, envelope);
         return {
-          title: fields.title || data.topic || 'Pigeon',
+          title: fields.title || data.topic || '',
           body: fields.markdown ? stripMarkdown(fields.message || '') : (fields.message || ''),
           image: fields.image || undefined,
           click: fields.click || undefined,
           topic: data.topic,
           id: data.id,
+          actions: filterBannedActions(fields.actions),
         };
       } catch (err) {
         console.warn('SW decrypt failed:', err);
       }
     }
     return {
-      title: data.topic ? `🔒 ${data.topic}` : 'Pigeon',
+      title: `🔒 ${data.topic}`,
       body: 'New encrypted message',
       topic: data.topic,
       id: data.id,
+      actions: [],
     };
   }
 
+  // Default title is the topic name (or the publisher's X-Title), never a
+  // generic "Pigeon". Default body is the message text.
   return {
-    title: data.title || data.topic || 'Pigeon',
+    title: data.title || data.topic || '',
     body: data.markdown ? stripMarkdown(data.message || '') : (data.message || ''),
     image: data.image || undefined,
     click: data.click || undefined,
     topic: data.topic,
     id: data.id,
+    actions: filterBannedActions(data.actions),
   };
 }
 
@@ -186,6 +220,38 @@ async function bumpUnreadBadge() {
   }
 }
 
+// Unregister one topic's push row from the shade. This is NOT Chrome's
+// origin-wide Unsubscribe: it does not revoke the PushSubscription, and other
+// topics keep their rows. It never focuses the PWA — the whole point is to
+// make a noisy topic quieter without leaving the drawer.
+async function muteTopicFromNotification(notification) {
+  const topic = notification.data && notification.data.topic;
+  if (!topic) return;
+  try {
+    await PigeonKeystore.setTopicMuted(topic);
+
+    const sub = await self.registration.pushManager.getSubscription();
+    const endpoint = sub && sub.endpoint;
+    if (endpoint) {
+      try {
+        await fetch(`/${topic}/push/subscribe`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ endpoint }),
+        });
+      } catch (err) {
+        // Offline: hand the delete to the page's durable retry queue.
+        await PigeonKeystore.addPendingUnsub({ topic, endpoint }).catch(() => {});
+      }
+    }
+
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    clients.forEach(c => c.postMessage({ type: 'pigeon-topic-muted', topic }));
+  } catch (err) {
+    console.warn('Mute topic failed:', err);
+  }
+}
+
 self.addEventListener('push', (event) => {
   let data = {};
   try {
@@ -210,20 +276,44 @@ self.addEventListener('push', (event) => {
       return;
     }
 
+    // #44: never leave a blank toast for the on-device model to flag, and
+    // never fall back to a title that is only "Pigeon".
+    const title = n.title || n.topic || 'Message';
+    const body = n.body || n.topic || 'Message';
+
     const options = {
-      body: n.body,
+      body,
       tag: n.id || undefined,
       icon: '/icon-192.png',
       badge: '/badge.png',
       image: n.image,
       data: { click: n.click, topic: n.topic, id: n.id },
     };
-    await self.registration.showNotification(n.title, options);
+
+    // Mute-this-topic is the reserved first action on every content
+    // notification. Feature-detect maxActions rather than UA-sniffing: Safari
+    // on iOS reports 0, where we just skip the button and keep the body tap.
+    if (isContentNotification(data) && typeof Notification !== 'undefined' && Notification.maxActions > 0) {
+      const actions = [{ action: 'pigeon-mute', title: 'Mute topic' }];
+      for (const a of n.actions) {
+        if (actions.length < Notification.maxActions) actions.push(a);
+        else break;
+      }
+      options.actions = actions;
+    }
+
+    await self.registration.showNotification(title, options);
     await bumpUnreadBadge();
   })());
 });
 
 self.addEventListener('notificationclick', (event) => {
+  if (event.action === 'pigeon-mute') {
+    event.notification.close();
+    event.waitUntil(muteTopicFromNotification(event.notification));
+    return;
+  }
+
   event.notification.close();
   const data = event.notification.data || {};
   const click = data.click;

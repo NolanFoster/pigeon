@@ -84,6 +84,19 @@ load and whenever the network comes back; the button reports that cleanup is
 still pending. Unsubscribing from a single topic unregisters push for that topic
 the same way.
 
+Chrome on Android now puts an **Unsubscribe** on every web-push toast. Pigeon
+treats that as the same "off" switch: when the permission flips to *denied*, the
+app runs the full teardown (`DELETE /push/subscribe`, revoke the subscription,
+remember the choice) and the header button returns to **Enable Push
+Notifications** — it does not show a "re-open Settings" prompt. If Chrome's
+Safety Check auto-revokes the grant instead (permission back to *default*), the
+button offers **Restore notifications** rather than silently re-subscribing.
+
+Every content notification also carries a **Mute topic** action. Tapping it
+unregisters only that topic's push row and closes the toast; other topics keep
+pushing and the PWA is not foregrounded. On browsers without notification
+actions (Safari on iOS) the button is simply omitted.
+
 ### Installed-app notifications
 
 When the PWA is open (installed or sitting in a tab), push delivery respects
@@ -224,6 +237,12 @@ Frontend hardening:
   unguessable capability URL issued by the push service. Anyone holding it can
   already impersonate that subscriber, so being able to unregister it grants
   nothing new — and making "off" work without an account is worth more.
+- Chrome on Android runs an on-device model over notification titles, bodies,
+  and action labels. Pigeon never sends an empty body or a generic
+  "Pigeon"/"Alert" title, and it rejects action labels that read like
+  permission prompts (`Allow`, `Verify`, `Click here`, …) so a spammy topic
+  can't get the whole origin flagged. Anyone who can POST to a topic can still
+  make every subscriber's phone show a toast — keep topic names unguessable.
 
 ## License
 

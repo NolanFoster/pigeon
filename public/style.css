@@ -590,6 +590,18 @@ button {
   vertical-align: middle;
 }
 
+/* Per-topic mute, set from the notification shade ("Mute topic"). */
+.topic-muted-badge {
+  display: inline-block;
+  background: var(--color-border);
+  color: var(--color-text-secondary);
+  border-radius: 12px;
+  padding: 0 0.4rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
 .messages-header {
   display: flex;
   justify-content: flex-end;

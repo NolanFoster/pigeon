@@ -121,10 +121,15 @@ test('a leftover subscription does not silently re-enable push on load', async (
   await subscribeTopic(page, topic);
 
   // Push is off, but the browser still holds a subscription — a teardown that
-  // was interrupted. Every reload used to re-register it for every topic.
+  // was interrupted. Every reload used to re-register it for every topic. The
+  // leftover endpoint is still on the server's books (registrations remain), so
+  // the next load finishes tearing it down.
   await page.evaluate(([key, endpoint]) => {
     localStorage.setItem('pigeon_push_enabled', '0');
     localStorage.setItem(key, endpoint);
+    localStorage.setItem('pigeon_push_registrations', JSON.stringify([
+      { topic: 'leftover-topic', endpoint },
+    ]));
   }, [ENDPOINT_KEY, 'https://fcm.googleapis.com/fcm/send/leftover']);
 
   const calls = trackPushRequests(page);
@@ -135,6 +140,35 @@ test('a leftover subscription does not silently re-enable push on load', async (
   await expect.poll(() => calls).toContain('DELETE /push/subscribe');
   expect(calls.filter(c => c.startsWith('POST'))).toHaveLength(0);
   await expect.poll(() => page.evaluate(() => window.__pushOps)).toContain('unsubscribe');
+});
+
+test('a Chrome Undo of a shade unsubscribe does not silently re-subscribe', async ({ page }) => {
+  await page.addInitScript(installPushStub);
+  await stubVapidKey(page);
+
+  await page.goto('/');
+
+  // Permission is granted and a subscription exists, but the durable off switch
+  // is set — the signature of Chrome's Undo after a shade unsubscribe. Nothing
+  // is owed to the server, so this must not tear down or re-register: stay off
+  // and offer Enable Push.
+  await page.evaluate(([key, endpoint]) => {
+    localStorage.setItem('pigeon_push_enabled', '0');
+    localStorage.setItem(key, endpoint);
+    localStorage.removeItem('pigeon_push_registrations');
+    localStorage.removeItem('pigeon_push_pending_unsub');
+  }, [ENDPOINT_KEY, 'https://fcm.googleapis.com/fcm/send/undo']);
+
+  const calls = trackPushRequests(page);
+  await page.reload();
+
+  await expect(page.locator('#enable-push-btn')).toHaveText('Enable Push Notifications');
+  await expect(page.locator('.toast')).toContainText('Chrome still allows notifications');
+
+  // No teardown, no re-registration, no unsubscribe of the restored subscription.
+  expect(calls.filter(c => c.startsWith('POST'))).toHaveLength(0);
+  expect(calls.filter(c => c.startsWith('DELETE'))).toHaveLength(0);
+  expect(await page.evaluate(() => window.__pushOps)).not.toContain('unsubscribe');
 });
 
 test('unsubscribing a topic clears its push registration on the server', async ({ page }) => {

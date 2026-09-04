@@ -118,6 +118,20 @@ async fn send_single_push(
     if status == 404 {
         return Err(PushError::NotFound);
     }
+    // #44: some push services answer a freshly-revoked grant with 401/403
+    // instead of 410. Treat those as Gone too, so the row is pruned and we stop
+    // fanning out to an endpoint Chrome already killed. 429 must NOT delete --
+    // that is rate limiting, not a dead grant (#40).
+    if status == 401 || status == 403 {
+        let body = resp.text().await.unwrap_or_default();
+        console_log!(
+            "Push endpoint {} returned {} (permission gone): {}",
+            endpoint,
+            status,
+            body
+        );
+        return Err(PushError::Gone);
+    }
     if status >= 400 {
         let body = resp.text().await.unwrap_or_default();
         console_log!("Push endpoint returned {}: {}", status, body);
