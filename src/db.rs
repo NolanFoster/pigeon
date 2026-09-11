@@ -3,6 +3,11 @@ use worker::wasm_bindgen::JsValue;
 
 use crate::models::{Message, PushSubscriptionRecord};
 
+// Replay bound (ntfy 2.28 parity): never return an unbounded topic. The SQL
+// below asks for one extra row (LIMIT 501) so callers can detect truncation
+// without a second round-trip.
+const REPLAY_MAX: usize = 500;
+
 pub async fn insert_message(db: &D1Database, msg: &Message) -> Result<()> {
     let stmt = db.prepare(
         "INSERT INTO messages (id, topic, title, message, priority, tags, click, image, markdown, created_at)
@@ -25,22 +30,74 @@ pub async fn insert_message(db: &D1Database, msg: &Message) -> Result<()> {
     Ok(())
 }
 
+/// Fetch messages for a topic since `since`, bounded to the newest 500 when
+/// `since == 0` ("all") or the first 500 after the cursor otherwise.
+///
+/// Returns `(messages, truncated)` where `truncated` is true when the cap cut
+/// the result short. Messages are always in ascending `created_at` order so the
+/// existing client can reverse them into a newest-first list unchanged.
+///
+/// The Durable Object's WebSocket history replay calls this same function, so
+/// the WS bootstrap and the JSON poll share the same replay bound.
 pub async fn get_messages_since(
     db: &D1Database,
     topic: &str,
     since: i64,
-) -> Result<Vec<Message>> {
+) -> Result<(Vec<Message>, bool)> {
+    if since == 0 {
+        // "all": newest 500. Query newest-first (insertion order breaks ties in
+        // the second-granularity created_at), keep the newest, reverse to
+        // ascending for the client.
+        let stmt = db.prepare(
+            "SELECT id, topic, title, message, priority, tags, click, image, markdown, created_at
+             FROM messages WHERE topic = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 501",
+        );
+        let result = stmt.bind(&[JsValue::from_str(topic)])?.all().await?;
+        let rows: Vec<MessageRow> = result.results()?;
+        let truncated = rows.len() > REPLAY_MAX;
+        let mut messages: Vec<Message> = rows
+            .into_iter()
+            .take(REPLAY_MAX)
+            .map(|r| r.into())
+            .collect();
+        messages.reverse();
+        Ok((messages, truncated))
+    } else {
+        // Forward from the cursor, stop at the cap so a cursor-holding client
+        // never skips.
+        let stmt = db.prepare(
+            "SELECT id, topic, title, message, priority, tags, click, image, markdown, created_at
+             FROM messages WHERE topic = ?1 AND created_at > ?2 ORDER BY created_at ASC, rowid ASC LIMIT 501",
+        );
+        let result = stmt
+            .bind(&[JsValue::from_str(topic), JsValue::from(since as f64)])?
+            .all()
+            .await?;
+        let rows: Vec<MessageRow> = result.results()?;
+        let truncated = rows.len() > REPLAY_MAX;
+        let messages: Vec<Message> = rows
+            .into_iter()
+            .take(REPLAY_MAX)
+            .map(|r| r.into())
+            .collect();
+        Ok((messages, truncated))
+    }
+}
+
+pub async fn get_message(
+    db: &D1Database,
+    topic: &str,
+    id: &str,
+) -> Result<Option<Message>> {
     let stmt = db.prepare(
         "SELECT id, topic, title, message, priority, tags, click, image, markdown, created_at
-         FROM messages WHERE topic = ?1 AND created_at > ?2 ORDER BY created_at ASC",
+         FROM messages WHERE topic = ?1 AND id = ?2 LIMIT 1",
     );
     let result = stmt
-        .bind(&[JsValue::from_str(topic), JsValue::from(since as f64)])?
-        .all()
+        .bind(&[JsValue::from_str(topic), JsValue::from_str(id)])?
+        .first::<MessageRow>(None)
         .await?;
-
-    let rows: Vec<MessageRow> = result.results()?;
-    Ok(rows.into_iter().map(|r| r.into()).collect())
+    Ok(result.map(|r| r.into()))
 }
 
 pub async fn get_push_subscriptions(

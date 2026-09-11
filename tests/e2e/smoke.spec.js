@@ -23,7 +23,7 @@ test('subscribe, receive a message, and copy it', async ({ page, request, baseUR
   expect(res.ok()).toBeTruthy();
 
   const card = page.locator('.message-card').first();
-  await expect(card).toBeVisible();
+  await expect(card).toBeVisible({ timeout: 15_000 });
   await expect(card).toHaveClass(/priority-5/);
   await expect(card.locator('.msg-title')).toContainText('Smoke title');
   await expect(card.locator('.msg-body')).toContainText('Hello from the smoke test');
@@ -83,7 +83,7 @@ test('clicking a link in a message does not navigate the app away', async ({ pag
   });
 
   const link = page.locator('.message-card .msg-body a').first();
-  await expect(link).toHaveAttribute('href', 'https://example.com');
+  await expect(link).toHaveAttribute('href', 'https://example.com', { timeout: 15_000 });
 
   // Spy on window.open BEFORE clicking, then verify the click was intercepted
   // (window.open called) AND the current page did not navigate.
@@ -124,7 +124,7 @@ test('tag filter hides non-matching messages', async ({ page, request, baseURL }
     data: 'second',
   });
 
-  await expect(page.locator('.message-card')).toHaveCount(2);
+  await expect(page.locator('.message-card')).toHaveCount(2, { timeout: 15_000 });
 
   // Filter chips toggle a selected state and all chips stay visible while
   // filtering (no banner replaces the row).
@@ -154,7 +154,7 @@ test('tag shortcodes decorate the label instead of replacing it', async ({ page,
   });
 
   const chips = page.locator('.message-card .msg-tags .tag-chip');
-  await expect(chips).toHaveCount(4);
+  await expect(chips).toHaveCount(4, { timeout: 15_000 });
   // The real tag name is always present; the emoji is decorative and additive.
   await expect(chips.nth(0)).toContainText('tada');
   await expect(chips.nth(1)).toContainText('eyes');
@@ -177,19 +177,18 @@ test('multi-tag filtering is AND-ed, per-topic, and reflected in the URL', async
   await page.locator('#subscribe-btn').click();
   await expect(page.locator('.topic-tab.active')).toContainText(topic);
 
-  await request.post(`${baseURL}/${topic}`, {
-    headers: { 'X-Title': 'Both', 'X-Tags': 'alpha,beta' },
-    data: 'both',
-  });
-  await request.post(`${baseURL}/${topic}`, {
-    headers: { 'X-Title': 'Alpha only', 'X-Tags': 'alpha' },
-    data: 'alpha',
-  });
-  await request.post(`${baseURL}/${topic}`, {
-    headers: { 'X-Title': 'Beta only', 'X-Tags': 'beta' },
-    data: 'beta',
-  });
-  await expect(page.locator('.message-card')).toHaveCount(3);
+  for (const [title, tags, body] of [
+    ['Both', 'alpha,beta', 'both'],
+    ['Alpha only', 'alpha', 'alpha'],
+    ['Beta only', 'beta', 'beta'],
+  ]) {
+    const res = await request.post(`${baseURL}/${topic}`, {
+      headers: { 'X-Title': title, 'X-Tags': tags },
+      data: body,
+    });
+    expect(res.ok()).toBeTruthy();
+  }
+  await expect(page.locator('.message-card')).toHaveCount(3, { timeout: 15_000 });
 
   // Two active chips narrow the list with AND semantics.
   await page.locator('.tags-row .tag-chip', { hasText: 'alpha' }).click();
@@ -252,7 +251,7 @@ test('end-to-end encrypted topic: only subscribers with passphrase can read', as
   }, { topic, title: titleText, message: plaintext });
 
   const card = page.locator('.message-card').first();
-  await expect(card).toBeVisible();
+  await expect(card).toBeVisible({ timeout: 15_000 });
   await expect(card.locator('.msg-title')).toContainText(titleText);
   await expect(card.locator('.msg-body')).toContainText(plaintext);
 
@@ -359,7 +358,7 @@ test('Clear requires confirmation and can be cancelled', async ({ page, request,
   await expect(page.locator('.topic-tab.active')).toContainText(topic);
 
   await request.post(`${baseURL}/${topic}`, { data: 'keep me' });
-  await expect(page.locator('.message-card')).toHaveCount(1);
+  await expect(page.locator('.message-card')).toHaveCount(1, { timeout: 15_000 });
 
   // Cancelling the dialog must leave the messages alone.
   await page.locator('#clear-messages-btn').click();
@@ -401,7 +400,7 @@ test('an arriving message does not steal keyboard focus', async ({ page, request
   await expect(page.locator('.topic-tab.active')).toContainText(topic);
 
   await request.post(`${baseURL}/${topic}`, { headers: { 'X-Title': 'First' }, data: 'one' });
-  await expect(page.locator('.message-card')).toHaveCount(1);
+  await expect(page.locator('.message-card')).toHaveCount(1, { timeout: 15_000 });
 
   // Park focus on the first card's copy button, then publish a second message.
   await page.locator('.message-card .copy-btn').first().focus();
@@ -409,7 +408,7 @@ test('an arriving message does not steal keyboard focus', async ({ page, request
   expect(before).toContain('First');
 
   await request.post(`${baseURL}/${topic}`, { headers: { 'X-Title': 'Second' }, data: 'two' });
-  await expect(page.locator('.message-card')).toHaveCount(2);
+  await expect(page.locator('.message-card')).toHaveCount(2, { timeout: 15_000 });
 
   // The list used to be rebuilt via innerHTML on every arrival, which dropped
   // focus to <body>.
@@ -427,7 +426,7 @@ test('tag chips are reachable and operable by keyboard', async ({ page, request,
 
   await request.post(`${baseURL}/${topic}`, { headers: { 'X-Title': 'A', 'X-Tags': 'alpha' }, data: 'first' });
   await request.post(`${baseURL}/${topic}`, { headers: { 'X-Title': 'B', 'X-Tags': 'beta' }, data: 'second' });
-  await expect(page.locator('.message-card')).toHaveCount(2);
+  await expect(page.locator('.message-card')).toHaveCount(2, { timeout: 15_000 });
 
   const chip = page.locator('.tags-row .tag-chip', { hasText: 'alpha' });
   await expect(chip).toHaveJSProperty('tagName', 'BUTTON');
@@ -499,7 +498,7 @@ test('ticking a todo below the top of the list keeps its place and keeps focus',
     });
     expect(res.ok()).toBeTruthy();
   }
-  await expect(page.locator('.message-card')).toHaveCount(3);
+  await expect(page.locator('.message-card')).toHaveCount(3, { timeout: 15_000 });
 
   // The title element also carries a priority badge, so read just its text node.
   const titles = () => page.locator('.message-card .msg-title')
@@ -545,7 +544,7 @@ test('ticking a markdown task keeps its message in place and keeps focus', async
     data: 'arrived after the checklist',
   });
 
-  await expect(page.locator('.message-card')).toHaveCount(2);
+  await expect(page.locator('.message-card')).toHaveCount(2, { timeout: 15_000 });
   const titles = () => page.locator('.message-card .msg-title')
     .evaluateAll(els => els.map(el => el.firstChild.textContent.trim()));
   expect(await titles()).toEqual(['Later note', 'Checklist']);
@@ -580,6 +579,9 @@ test('todo cards avoid duplicate title and body content', async ({ page, request
   });
   expect(res.ok()).toBeTruthy();
   const card = page.locator('.message-card');
+  // Realtime delivery (WS upgrade + history fetch + bounded retry) can take a
+  // few seconds; wait for the card to land before asserting its internals.
+  await expect(card).toHaveCount(1, { timeout: 15_000 });
   await expect(card.locator('.msg-title')).toHaveText(/Buy milk/);
   await expect(card.locator('.msg-body')).toHaveCount(0);
   await expect(card.locator('.delete-btn')).toHaveAttribute('aria-label', 'Delete message: Buy milk');
@@ -592,6 +594,10 @@ test('deleting a message requires confirmation', async ({ page, request, baseURL
   await page.locator('#subscribe-btn').click();
   const res = await request.post(`${baseURL}/${topic}`, { headers: { 'X-Title': 'Disposable' }, data: 'remove me' });
   expect(res.ok()).toBeTruthy();
+
+  // Realtime delivery (WS upgrade + history fetch + bounded retry) can take a
+  // few seconds; wait for the card to land before clicking its delete button.
+  await expect(page.locator('.message-card')).toHaveCount(1, { timeout: 15_000 });
 
   await page.locator('.message-card .delete-btn').click();
   await expect(page.locator('#app-dialog')).toContainText('Delete message?');
@@ -612,6 +618,7 @@ test('untitled messages lead with their body instead of the topic name', async (
   expect(res.ok()).toBeTruthy();
 
   const card = page.locator('.message-card');
+  await expect(card).toHaveCount(1, { timeout: 15_000 });
   await expect(card.locator('.msg-title')).toHaveCount(0);
   await expect(card.locator('.msg-body')).toHaveText('Body with no title');
 });

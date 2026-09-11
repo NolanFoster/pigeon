@@ -4,6 +4,10 @@ use worker::wasm_bindgen::JsValue;
 use crate::db;
 use crate::models::validate_topic;
 
+// 500 messages or 1 MB of JSON, whichever comes first. D1 is not ntfy.sh; 10 MB
+// is more than a Worker should buffer for a single poll.
+const MAX_JSON_BYTES: usize = 1_000_000;
+
 pub async fn handle(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let topic = ctx.param("topic").unwrap();
     validate_topic(topic)?;
@@ -22,9 +26,43 @@ pub async fn handle(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
         .unwrap_or(0);
 
     let d1 = ctx.env.d1("DB")?;
-    let messages = db::get_messages_since(&d1, topic, since).await?;
+    let (mut messages, mut truncated) = db::get_messages_since(&d1, topic, since).await?;
 
-    Response::from_json(&messages)
+    // Enforce the 1 MB JSON cap. For since=all the list is ascending after the
+    // newest-batch selection, so drop from the FRONT (the oldest) to keep the
+    // newest that fit; for a forward cursor drop from the END (the later ones)
+    // so a cursor-holding client never skips.
+    while serde_json::to_vec(&messages)?.len() > MAX_JSON_BYTES && messages.len() > 1 {
+        if since == 0 {
+            messages.remove(0);
+        } else {
+            messages.pop();
+        }
+        truncated = true;
+    }
+
+    let json = serde_json::to_string(&messages)?;
+    let headers = Headers::new();
+    headers.set("Content-Type", "application/json")?;
+    if truncated {
+        headers.set("X-Messages-Truncated", "1")?;
+    }
+    Ok(Response::ok(json)?.with_headers(headers))
+}
+
+/// Single-message fetch, used by the service worker to upgrade a thin E2EE push
+/// whose `ct` was omitted for size. Same capability-URL security as the poll
+/// route: knowing the topic is enough.
+pub async fn get_one(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let topic = ctx.param("topic").unwrap().to_string();
+    validate_topic(&topic)?;
+    let id = ctx.param("id").unwrap().to_string();
+
+    let d1 = ctx.env.d1("DB")?;
+    match db::get_message(&d1, &topic, &id).await? {
+        Some(msg) => Response::from_json(&msg),
+        None => Response::error("Not found", 404),
+    }
 }
 
 pub async fn delete(_req: Request, ctx: RouteContext<()>) -> Result<Response> {

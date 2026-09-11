@@ -66,7 +66,13 @@ impl TopicRoom {
         if let (Some(topic), Some(since_ts)) = (topic, since) {
             if validate_topic(&topic).is_ok() {
                 if let Ok(database) = self.env.d1("DB") {
-                    if let Ok(messages) = db::get_messages_since(&database, &topic, since_ts).await {
+                    // The WS replay shares the same 500-message cap as the JSON
+                    // poll (get_messages_since bounds both). The `truncated`
+                    // flag has no meaning over a socket; the page bootstraps
+                    // from the capped poll and then streams live.
+                    if let Ok((messages, _truncated)) =
+                        db::get_messages_since(&database, &topic, since_ts).await
+                    {
                         for message in messages {
                             let json = serde_json::to_string(&message)?;
                             // A failed send is harmless: broadcast cleanup will

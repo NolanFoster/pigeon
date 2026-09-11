@@ -5,6 +5,12 @@ use worker::wasm_bindgen::JsValue;
 use crate::db;
 use crate::models::{Message, validate_topic};
 
+// ntfy 2.28 field caps. Titles and tags are fan-out amplifiers: every
+// subscriber's Web Push carries them, so an unbounded header inflates every
+// fan-out. Byte length, not character length (matches ntfy and how FCM counts).
+const TITLE_MAX_BYTES: usize = 1024;
+const TAGS_MAX_BYTES: usize = 512;
+
 pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let topic = ctx.param("topic").unwrap().to_string();
     validate_topic(&topic)?;
@@ -60,6 +66,23 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
             markdown_header,
         )
     };
+
+    // Publish field caps (§1). Reject before D1 insert so a 1 MB title can't
+    // inflate every fan-out. The caps apply to the plaintext path only — E2EE
+    // POSTs ignore content headers (the plaintext lives inside the envelope),
+    // and their size stays bounded by the body ceiling.
+    if !is_encrypted {
+        if let Some(t) = title_header.as_deref() {
+            if t.len() > TITLE_MAX_BYTES {
+                return Response::error("title too long", 400);
+            }
+        }
+        if let Some(t) = tags_header.as_deref() {
+            if t.len() > TAGS_MAX_BYTES {
+                return Response::error("tags too long", 400);
+            }
+        }
+    }
 
     // Reject oversized bodies before reading them — otherwise a 100MB POST
     // is fully buffered into worker memory before the post-read check fires.

@@ -771,6 +771,9 @@ async function connectTopic(topic) {
   ws.onopen = async () => {
     renderConnectionStatus();
     try {
+      // since=all now returns the newest 500 messages (server caps the replay);
+      // X-Messages-Truncated is intentionally ignored here — the open PWA
+      // stays current via the live WebSocket.
       const res = await fetch(`/${topic}/json?since=all`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const msgs = await res.json();
