@@ -580,6 +580,9 @@ test('todo cards avoid duplicate title and body content', async ({ page, request
   });
   expect(res.ok()).toBeTruthy();
   const card = page.locator('.message-card');
+  // Realtime delivery (WS upgrade + history fetch + bounded retry) can take a
+  // few seconds; wait for the card to land before asserting its internals.
+  await expect(card).toHaveCount(1, { timeout: 15_000 });
   await expect(card.locator('.msg-title')).toHaveText(/Buy milk/);
   await expect(card.locator('.msg-body')).toHaveCount(0);
   await expect(card.locator('.delete-btn')).toHaveAttribute('aria-label', 'Delete message: Buy milk');
