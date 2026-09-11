@@ -596,6 +596,10 @@ test('deleting a message requires confirmation', async ({ page, request, baseURL
   const res = await request.post(`${baseURL}/${topic}`, { headers: { 'X-Title': 'Disposable' }, data: 'remove me' });
   expect(res.ok()).toBeTruthy();
 
+  // Realtime delivery (WS upgrade + history fetch + bounded retry) can take a
+  // few seconds; wait for the card to land before clicking its delete button.
+  await expect(page.locator('.message-card')).toHaveCount(1, { timeout: 15_000 });
+
   await page.locator('.message-card .delete-btn').click();
   await expect(page.locator('#app-dialog')).toContainText('Delete message?');
   await page.locator('#app-dialog-cancel').click();
