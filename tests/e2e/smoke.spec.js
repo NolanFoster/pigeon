@@ -177,6 +177,13 @@ test('multi-tag filtering is AND-ed, per-topic, and reflected in the URL', async
   await page.locator('#subscribe-btn').click();
   await expect(page.locator('.topic-tab.active')).toContainText(topic);
 
+  // Publishing races the live connection: the tab renders before the WebSocket
+  // upgrade completes, and a POST that lands before the durable object has
+  // registered the socket would only be picked up by a later history poll.
+  // Wait until the connection is actually live so each publish is delivered in
+  // real time and none of the three messages is left waiting on a re-poll.
+  await expect(page.locator('#connection-status')).toHaveAttribute('data-state', 'live', { timeout: 15_000 });
+
   for (const [title, tags, body] of [
     ['Both', 'alpha,beta', 'both'],
     ['Alpha only', 'alpha', 'alpha'],
