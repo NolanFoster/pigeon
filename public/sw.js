@@ -1,7 +1,7 @@
 /* global PigeonCrypto, PigeonKeystore */
 importScripts('/keystore.js', '/crypto.js');
 
-const CACHE_NAME = 'pigeon-v7';
+const CACHE_NAME = 'pigeon-v8';
 // The editor bundle, its stylesheets and the icons were previously missing, so
 // an offline launch rendered without a compose box.
 const STATIC_ASSETS = [
@@ -88,9 +88,9 @@ function stripMarkdown(text) {
 }
 
 async function buildNotification(data) {
-  // If the server flagged this as encrypted, try to decrypt with the stored
-  // topic key. On any failure, fall back to a generic notification so the
-  // user still gets a heads-up.
+  // If the server flagged this as encrypted with a ciphertext envelope, try to
+  // decrypt with the stored topic key. On any failure, fall back to a generic
+  // notification so the user still gets a heads-up.
   if (data && data.encrypted && typeof data.ct === 'string' && data.topic) {
     const envelope = PigeonCrypto.parseEnvelope(data.ct);
     const rec = await PigeonKeystore.getTopicKey(data.topic).catch(() => null);
@@ -100,34 +100,140 @@ async function buildNotification(data) {
         // mints a fresh local salt) still decrypts pushes encrypted earlier.
         const key = await PigeonCrypto.deriveKey(rec.passphrase, envelope.kdf.salt, envelope.kdf.iter);
         const fields = await PigeonCrypto.decryptEnvelope(key, envelope);
-        return {
-          title: fields.title || data.topic || 'Pigeon',
-          body: fields.markdown ? stripMarkdown(fields.message || '') : (fields.message || ''),
-          image: fields.image || undefined,
-          click: fields.click || undefined,
+        return buildPlaintext({
+          title: fields.title,
+          message: fields.message,
+          markdown: fields.markdown,
+          image: fields.image,
+          click: fields.click,
           topic: data.topic,
           id: data.id,
-        };
+        });
       } catch (err) {
         console.warn('SW decrypt failed:', err);
       }
     }
+    return genericEncrypted(data);
+  }
+
+  return buildPlaintext(data);
+}
+
+// Split a string into grapheme clusters (falls back to code points). Lock
+// Screen truncation must never split an emoji sequence mid-cluster.
+function graphemeSegments(text) {
+  if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+    const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+    return Array.from(seg.segment(text), (s) => s.segment);
+  }
+  return Array.from(text);
+}
+
+function truncateChars(text, max) {
+  if (!text) return '';
+  const segs = graphemeSegments(text);
+  if (segs.length <= max) return text;
+  return segs.slice(0, max).join('');
+}
+
+// First-line copy (delivery budget §5). The Lock Screen may rewrite the
+// notification, so the fact must be in the first line. Never fall back to the
+// topic name or "Pigeon" as a title (#23, #44).
+function buildPlaintext(data) {
+  const message = data.markdown ? stripMarkdown(data.message || '') : (data.message || '');
+
+  if (data.title) {
     return {
-      title: data.topic ? `🔒 ${data.topic}` : 'Pigeon',
-      body: 'New encrypted message',
+      title: truncateChars(data.title, 50),
+      body: truncateChars(message, 120),
+      image: data.image || undefined,
+      click: data.click || undefined,
       topic: data.topic,
       id: data.id,
     };
   }
 
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return {
+      title: 'New message',
+      body: data.topic || '',
+      topic: data.topic,
+      id: data.id,
+    };
+  }
+
+  const nl = trimmed.search(/\r?\n/);
+  const first = nl === -1 ? trimmed : trimmed.slice(0, nl);
+  const rest = nl === -1 ? '' : trimmed.slice(nl).replace(/^\r?\n/, '').trimStart();
+
   return {
-    title: data.title || data.topic || 'Pigeon',
-    body: data.markdown ? stripMarkdown(data.message || '') : (data.message || ''),
+    title: truncateChars(first, 50),
+    body: truncateChars(rest, 120),
     image: data.image || undefined,
     click: data.click || undefined,
     topic: data.topic,
     id: data.id,
   };
+}
+
+function genericEncrypted(data) {
+  return {
+    title: data.topic ? `🔒 ${data.topic}` : 'New encrypted message',
+    body: 'New encrypted message',
+    topic: data.topic,
+    id: data.id,
+  };
+}
+
+// A thin E2EE push omitted `ct` to stay inside the push-service size budget.
+// The closed PWA can't decrypt from the push alone, so fetch the full envelope
+// and replace the generic toast with the real copy. On any failure keep the
+// generic toast — userVisibleOnly is satisfied either way.
+async function tryFetchAndDecrypt(data) {
+  if (!data || !data.topic || !data.id) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2000);
+  try {
+    const res = await fetch(
+      `/${encodeURIComponent(data.topic)}/messages/${encodeURIComponent(data.id)}`,
+      { credentials: 'omit', signal: controller.signal },
+    );
+    if (!res.ok) return null;
+    const full = await res.json();
+    const envelope = PigeonCrypto.parseEnvelope(full.message);
+    if (!envelope) return null;
+    const rec = await PigeonKeystore.getTopicKey(data.topic).catch(() => null);
+    if (!rec || !rec.passphrase) return null;
+    const key = await PigeonCrypto.deriveKey(rec.passphrase, envelope.kdf.salt, envelope.kdf.iter);
+    const fields = await PigeonCrypto.decryptEnvelope(key, envelope);
+    return buildPlaintext({
+      title: fields.title,
+      message: fields.message,
+      markdown: fields.markdown,
+      image: fields.image,
+      click: fields.click,
+      topic: data.topic,
+      id: data.id,
+    });
+  } catch (err) {
+    console.warn('SW thin-push upgrade failed:', err);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function showNotificationFor(n) {
+  const options = {
+    body: n.body,
+    tag: n.id || undefined,
+    icon: '/icon-192.png',
+    badge: '/badge.png',
+    image: n.image,
+    data: { click: n.click, topic: n.topic },
+  };
+  await self.registration.showNotification(n.title, options);
 }
 
 self.addEventListener('push', (event) => {
@@ -139,16 +245,15 @@ self.addEventListener('push', (event) => {
   }
 
   event.waitUntil((async () => {
-    const n = await buildNotification(data);
-    const options = {
-      body: n.body,
-      tag: n.id || undefined,
-      icon: '/icon-192.png',
-      badge: '/badge.png',
-      image: n.image,
-      data: { click: n.click, topic: n.topic },
-    };
-    await self.registration.showNotification(n.title, options);
+    // Thin E2EE push (encrypted but no ct): show the generic toast immediately,
+    // then try to fetch + decrypt the full envelope and replace it.
+    if (data && data.encrypted && typeof data.ct !== 'string' && data.topic && data.id) {
+      await showNotificationFor(genericEncrypted(data));
+      const real = await tryFetchAndDecrypt(data);
+      if (real) await showNotificationFor(real);
+      return;
+    }
+    await showNotificationFor(await buildNotification(data));
   })());
 });
 
@@ -167,6 +272,9 @@ self.addEventListener('notificationclick', (event) => {
     } catch {
       // Fall back to root.
     }
+  } else if (event.notification.data && event.notification.data.topic) {
+    // No X-Click: body-tap opens the topic (deep link), not the bare shell.
+    url = `/?topic=${encodeURIComponent(event.notification.data.topic)}`;
   }
   event.waitUntil(clients.openWindow(url));
 });

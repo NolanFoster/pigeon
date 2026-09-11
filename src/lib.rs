@@ -165,6 +165,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .get_async("/vapid-key", routes::push::vapid_key)
         .post_async("/:topic", routes::publish::handle)
         .get_async("/:topic/json", routes::poll::handle)
+        .get_async("/:topic/messages/:id", routes::poll::get_one)
         .get_async("/:topic/sse", routes::subscribe::handle)
         .delete_async("/:topic/messages", routes::poll::delete)
         .delete_async("/:topic/messages/:id", routes::poll::delete_one)

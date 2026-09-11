@@ -39,21 +39,32 @@ curl -H "X-Markdown: 1" \
 
 ### Headers
 
-| Header | Description | Default |
-|--------|-------------|---------|
-| `X-Title` | Message title | Topic name |
-| `X-Priority` | 1 (min) to 5 (max) | 3 |
-| `X-Tags` | Comma-separated tags | — |
-| `X-Click` | URL to open on notification click | — |
-| `X-Markdown` | Set to `1` to enable markdown rendering | 0 |
+| Header | Description | Default | Limit |
+|--------|-------------|---------|-------|
+| `X-Title` | Message title | Topic name | 1024 bytes |
+| `X-Priority` | 1 (min) to 5 (max) | 3 | 1–5 |
+| `X-Tags` | Comma-separated tags | — | 512 bytes (combined) |
+| `X-Click` | URL to open on notification click | — | — |
+| `X-Markdown` | Set to `1` to enable markdown rendering | 0 | — |
+
+> **Lock Screen copy.** The Lock Screen may rewrite your notification (Apple
+> Intelligence / Chrome on-device ML). Put the fact in `X-Title` (≤50
+> characters): `disk2 backup failed`, not `Pigeon` or the topic name. The body
+> is one supporting detail. Priority 5 still breaks quiet hours and
+> skip-collapse; it will not stop the summarizer from condensing a vague title.
+
+Over-limit titles and tags are rejected with HTTP 400 (`title too long` /
+`tags too long`) rather than silently truncated — a publisher who set them
+meant them.
 
 ### API
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/:topic` | Publish a message |
-| `GET` | `/:topic/json?since=<ts>` | Poll messages since Unix timestamp (`all` for all) |
+| `GET` | `/:topic/json?since=<ts>` | Poll messages since Unix timestamp (`all` for all); capped at the newest 500 (or 1 MB), sets `X-Messages-Truncated: 1` when truncated |
 | `GET` | `/:topic/sse` | WebSocket stream of new messages |
+| `GET` | `/:topic/messages/:id` | Fetch a single message |
 | `DELETE` | `/:topic/messages` | Delete all messages for a topic |
 | `DELETE` | `/:topic/messages/:id` | Delete a single message |
 | `POST` | `/:topic/push/subscribe` | Register Web Push subscription |
@@ -62,6 +73,20 @@ curl -H "X-Markdown: 1" \
 | `GET` | `/vapid-key` | Get VAPID public key for push setup |
 
 Both unsubscribe endpoints take `{"endpoint": "https://…"}` as the body.
+
+### Delivery budget
+
+The HTTP POST, the stored row, and the Web Push are three different sizes on
+purpose:
+
+- **D1 + WebSocket** keep the full message (up to 8192 bytes plaintext,
+  16384 bytes E2EE).
+- **Web Push** is a *thin* payload — the body is truncated to 240 bytes, the
+  title to 120 bytes, and hero images are omitted — so it always fits the 4 KB
+  FCM/APNs envelope. A >3500-byte E2EE envelope omits `ct` and the service
+  worker fetches the full ciphertext from `GET /:topic/messages/:id` to decrypt.
+- **Poll replay** is bounded to the newest 500 messages (or 1 MB of JSON), with
+  `X-Messages-Truncated: 1` signalling a cut.
 
 ### Turning push notifications off
 
@@ -186,9 +211,11 @@ Client (curl/app)                    Browser (PWA)
 Pigeon is intentionally simple: there is no account system, no API tokens, and
 no per-topic ACLs. Knowing a topic name is the only thing required to publish,
 read, or delete its messages. Pick unguessable names (treat them like
-capability URLs) and rotate them when they leak. If you need stronger access
-control, put Pigeon behind a reverse proxy that enforces auth — or front it
-with Cloudflare Access / WAF rate-limit rules.
+capability URLs) and rotate them when they leak. Title and tags are capped
+(1024 / 512 bytes) because they are fan-out amplifiers — every subscriber's
+Web Push carries them — so an unbounded header would inflate every fan-out.
+If you need stronger access control, put Pigeon behind a reverse proxy that
+enforces auth — or front it with Cloudflare Access / WAF rate-limit rules.
 
 End-to-end encrypted topics are different: the server only sees an opaque
 ciphertext envelope and a fixed `[encrypted]` placeholder. Anyone with the
