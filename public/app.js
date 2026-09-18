@@ -851,43 +851,47 @@ async function connectTopic(topic) {
         renderTopicTabs();
       }
 
-      // A publisher can POST immediately after the subscribe UI becomes,
-      // before its socket upgrade or the first D1 read has completed. Retry an
-      // empty initial read for a short, bounded period and merge results so a
-      // delayed read can never overwrite a message received live.
-      if (state.messages[topic].length === 0 && earlyMessages.length === 0) {
-        const recoverMissedInitialHistory = async (attempt = 0) => {
-          if (!state.topics.includes(topic) || state.messages[topic].length !== 0) return;
-          try {
-            const retry = await fetch(`/${topic}/json?since=all`);
-            if (!retry.ok) return;
-            const missed = await retry.json();
-            await Promise.all(missed.map(m => tryDecryptMessage(topic, m)));
-            let recovered = 0;
-            for (const msg of missed.reverse()) {
-              if (!state.messages[topic].some(m => m.id === msg.id)) {
-                insertMessage(topic, msg);
-                recovered++;
-              }
+      // A publisher can POST in the gap between the WebSocket upgrade, the
+      // Durable Object's history replay, and the first D1 read — a message can
+      // then be missed by every live path. Re-read history after the socket is
+      // live and merge anything we don't already have (dedup by id). This also
+      // covers the partial-miss case the old empty-only retry never recovered:
+      // a read that returned one message while another was still landing.
+      const recoverMissedInitialHistory = async (attempt = 0) => {
+        if (!state.topics.includes(topic)) return;
+        try {
+          const retry = await fetch(`/${topic}/json?since=all`);
+          if (!retry.ok) return;
+          const missed = await retry.json();
+          await Promise.all(missed.map(m => tryDecryptMessage(topic, m)));
+          let recovered = 0;
+          for (const msg of missed.reverse()) {
+            if (!state.messages[topic].some(m => m.id === msg.id)) {
+              insertMessage(topic, msg);
+              recovered++;
             }
-            if (recovered > 0) {
-              await cacheTopicMessages(topic);
-              if (state.activeTopic === topic) renderMessages();
-              else {
-                state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + recovered;
-                renderTopicTabs();
-              }
-            } else if (attempt < 4 && state.messages[topic].length === 0) {
-              // D1 visibility and the WebSocket upgrade can each trail the
-              // publish response. Back off, but stop after about four seconds.
-              setTimeout(() => recoverMissedInitialHistory(attempt + 1), 250 * (2 ** attempt));
-            }
-          } catch (retryErr) {
-            console.warn(`Retrying initial history for ${topic} failed:`, retryErr);
           }
-        };
-        setTimeout(recoverMissedInitialHistory, 250);
-      }
+          if (recovered > 0) {
+            await cacheTopicMessages(topic);
+            if (state.activeTopic === topic) renderMessages();
+            else {
+              state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + recovered;
+              renderTopicTabs();
+            }
+          }
+          // D1 visibility and the WebSocket upgrade can each trail the publish
+          // response. Keep re-reading briefly while the topic is still empty or
+          // while the previous pass recovered rows (a publisher still landing);
+          // stop once we have messages and a pass adds nothing — live delivery
+          // owns the rest. Back off, but stop after about four seconds.
+          if (attempt < 4 && (state.messages[topic].length === 0 || recovered > 0)) {
+            setTimeout(() => recoverMissedInitialHistory(attempt + 1), 250 * (2 ** attempt));
+          }
+        } catch (retryErr) {
+          console.warn(`Retrying initial history for ${topic} failed:`, retryErr);
+        }
+      };
+      setTimeout(recoverMissedInitialHistory, 300);
     } catch (err) {
       // Only use the cache when server history is unavailable. A late IndexedDB
       // read must never replace newer messages received from the server.
