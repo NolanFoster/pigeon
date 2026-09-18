@@ -504,8 +504,54 @@ function initTopicSortable() {
   });
 }
 
+// Copy-without-open consume path (#50). The service worker has no clipboard, so
+// the Copy shade action opens /?topic=...&copy=1#c=<body>; this runs on load,
+// writes the fragment to the clipboard, toasts, and strips the secret from the
+// URL bar.
+async function consumeCopyFragment() {
+  const params = new URLSearchParams(location.search);
+  if (params.get('copy') !== '1') return;
+  if (!location.hash.startsWith('#c=')) return;
+
+  let body;
+  try {
+    body = decodeURIComponent(location.hash.slice(3));
+  } catch {
+    return;
+  }
+  if (!body) return;
+
+  // Drop the fragment immediately so the secret never lingers in the URL bar.
+  history.replaceState(null, '', location.pathname + location.search);
+
+  try {
+    await navigator.clipboard.writeText(body);
+    showToast('Copied', { tone: 'success' });
+  } catch (err) {
+    // Clipboard denied: show the text in a selectable field. Never prompt().
+    showCopyFallback(body);
+  }
+}
+
+function showCopyFallback(text) {
+  const dialog = document.getElementById('copy-dialog');
+  const field = document.getElementById('copy-dialog-text');
+  const closeBtn = document.getElementById('copy-dialog-close');
+  if (!dialog || !field || typeof dialog.showModal !== 'function') return;
+  field.value = text;
+  closeBtn.onclick = () => dialog.close();
+  dialog.showModal();
+  field.focus();
+  field.select();
+}
+
 // Initialize
 async function init() {
+  // Copy-without-open lands here with the shade body in the URL fragment.
+  // Handle it before async PWA setup so the clipboard write and toast happen
+  // even while the service worker is being installed or updated.
+  await consumeCopyFragment();
+
   // Handle launch actions before asynchronous PWA setup. This makes a
   // subscribe shortcut immediately ready for input even while the service
   // worker is being installed or updated.

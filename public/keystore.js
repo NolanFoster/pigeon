@@ -9,9 +9,15 @@
 
 (function (root) {
   const DB_NAME = 'pigeon';
-  const DB_VERSION = 2;
+  const DB_VERSION = 3;
   const STORE_KEYS = 'topic_keys';
   const STORE_MESSAGES = 'topic_messages';
+  // Origin-wide audible budget (#50): a single row recording when the last
+  // non-silent notification was shown, so the service worker can honour the
+  // Android 16/17 Notification Cooldown (at most one audible heads-up per
+  // minute). One row, not per topic — the cooldown is per app, not per topic.
+  const STORE_AUDIBLE = 'pigeon_audible';
+  const AUDIBLE_KEY = 'lastAudibleAt';
 
   function open() {
     return new Promise((resolve, reject) => {
@@ -23,6 +29,9 @@
         }
         if (!db.objectStoreNames.contains(STORE_MESSAGES)) {
           db.createObjectStore(STORE_MESSAGES, { keyPath: 'topic' });
+        }
+        if (!db.objectStoreNames.contains(STORE_AUDIBLE)) {
+          db.createObjectStore(STORE_AUDIBLE, { keyPath: 'key' });
         }
       };
       req.onsuccess = () => resolve(req.result);
@@ -90,8 +99,29 @@
     db.close();
   }
 
+  // Audible-budget timestamp (#50). Returns the epoch-ms of the last non-silent
+  // notification, or null if none has been recorded yet.
+  async function getLastAudibleAt() {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_AUDIBLE, 'readonly');
+      const req = tx.objectStore(STORE_AUDIBLE).get(AUDIBLE_KEY);
+      req.onsuccess = () => { db.close(); resolve(req.result ? req.result.value : null); };
+      req.onerror = () => { db.close(); reject(req.error); };
+    });
+  }
+
+  async function setLastAudibleAt(ms) {
+    const db = await open();
+    const tx = db.transaction(STORE_AUDIBLE, 'readwrite');
+    tx.objectStore(STORE_AUDIBLE).put({ key: AUDIBLE_KEY, value: ms });
+    await txPromise(tx);
+    db.close();
+  }
+
   root.PigeonKeystore = {
     putTopicKey, getTopicKey, deleteTopicKey,
     putTopicMessages, getTopicMessages, deleteTopicMessages,
+    getLastAudibleAt, setLastAudibleAt,
   };
 })(typeof self !== 'undefined' ? self : window);
