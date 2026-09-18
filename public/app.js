@@ -504,8 +504,54 @@ function initTopicSortable() {
   });
 }
 
+// Copy-without-open consume path (#50). The service worker has no clipboard, so
+// the Copy shade action opens /?topic=...&copy=1#c=<body>; this runs on load,
+// writes the fragment to the clipboard, toasts, and strips the secret from the
+// URL bar.
+async function consumeCopyFragment() {
+  const params = new URLSearchParams(location.search);
+  if (params.get('copy') !== '1') return;
+  if (!location.hash.startsWith('#c=')) return;
+
+  let body;
+  try {
+    body = decodeURIComponent(location.hash.slice(3));
+  } catch {
+    return;
+  }
+  if (!body) return;
+
+  // Drop the fragment immediately so the secret never lingers in the URL bar.
+  history.replaceState(null, '', location.pathname + location.search);
+
+  try {
+    await navigator.clipboard.writeText(body);
+    showToast('Copied', { tone: 'success' });
+  } catch (err) {
+    // Clipboard denied: show the text in a selectable field. Never prompt().
+    showCopyFallback(body);
+  }
+}
+
+function showCopyFallback(text) {
+  const dialog = document.getElementById('copy-dialog');
+  const field = document.getElementById('copy-dialog-text');
+  const closeBtn = document.getElementById('copy-dialog-close');
+  if (!dialog || !field || typeof dialog.showModal !== 'function') return;
+  field.value = text;
+  closeBtn.onclick = () => dialog.close();
+  dialog.showModal();
+  field.focus();
+  field.select();
+}
+
 // Initialize
 async function init() {
+  // Copy-without-open lands here with the shade body in the URL fragment.
+  // Handle it before async PWA setup so the clipboard write and toast happen
+  // even while the service worker is being installed or updated.
+  await consumeCopyFragment();
+
   // Handle launch actions before asynchronous PWA setup. This makes a
   // subscribe shortcut immediately ready for input even while the service
   // worker is being installed or updated.
@@ -805,43 +851,47 @@ async function connectTopic(topic) {
         renderTopicTabs();
       }
 
-      // A publisher can POST immediately after the subscribe UI becomes,
-      // before its socket upgrade or the first D1 read has completed. Retry an
-      // empty initial read for a short, bounded period and merge results so a
-      // delayed read can never overwrite a message received live.
-      if (state.messages[topic].length === 0 && earlyMessages.length === 0) {
-        const recoverMissedInitialHistory = async (attempt = 0) => {
-          if (!state.topics.includes(topic) || state.messages[topic].length !== 0) return;
-          try {
-            const retry = await fetch(`/${topic}/json?since=all`);
-            if (!retry.ok) return;
-            const missed = await retry.json();
-            await Promise.all(missed.map(m => tryDecryptMessage(topic, m)));
-            let recovered = 0;
-            for (const msg of missed.reverse()) {
-              if (!state.messages[topic].some(m => m.id === msg.id)) {
-                insertMessage(topic, msg);
-                recovered++;
-              }
+      // A publisher can POST in the gap between the WebSocket upgrade, the
+      // Durable Object's history replay, and the first D1 read — a message can
+      // then be missed by every live path. Re-read history after the socket is
+      // live and merge anything we don't already have (dedup by id). This also
+      // covers the partial-miss case the old empty-only retry never recovered:
+      // a read that returned one message while another was still landing.
+      const recoverMissedInitialHistory = async (attempt = 0) => {
+        if (!state.topics.includes(topic)) return;
+        try {
+          const retry = await fetch(`/${topic}/json?since=all`);
+          if (!retry.ok) return;
+          const missed = await retry.json();
+          await Promise.all(missed.map(m => tryDecryptMessage(topic, m)));
+          let recovered = 0;
+          for (const msg of missed.reverse()) {
+            if (!state.messages[topic].some(m => m.id === msg.id)) {
+              insertMessage(topic, msg);
+              recovered++;
             }
-            if (recovered > 0) {
-              await cacheTopicMessages(topic);
-              if (state.activeTopic === topic) renderMessages();
-              else {
-                state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + recovered;
-                renderTopicTabs();
-              }
-            } else if (attempt < 4 && state.messages[topic].length === 0) {
-              // D1 visibility and the WebSocket upgrade can each trail the
-              // publish response. Back off, but stop after about four seconds.
-              setTimeout(() => recoverMissedInitialHistory(attempt + 1), 250 * (2 ** attempt));
-            }
-          } catch (retryErr) {
-            console.warn(`Retrying initial history for ${topic} failed:`, retryErr);
           }
-        };
-        setTimeout(recoverMissedInitialHistory, 250);
-      }
+          if (recovered > 0) {
+            await cacheTopicMessages(topic);
+            if (state.activeTopic === topic) renderMessages();
+            else {
+              state.unreadCounts[topic] = (state.unreadCounts[topic] || 0) + recovered;
+              renderTopicTabs();
+            }
+          }
+          // D1 visibility and the WebSocket upgrade can each trail the publish
+          // response. Keep re-reading briefly while the topic is still empty or
+          // while the previous pass recovered rows (a publisher still landing);
+          // stop once we have messages and a pass adds nothing — live delivery
+          // owns the rest. Back off, but stop after about four seconds.
+          if (attempt < 4 && (state.messages[topic].length === 0 || recovered > 0)) {
+            setTimeout(() => recoverMissedInitialHistory(attempt + 1), 250 * (2 ** attempt));
+          }
+        } catch (retryErr) {
+          console.warn(`Retrying initial history for ${topic} failed:`, retryErr);
+        }
+      };
+      setTimeout(recoverMissedInitialHistory, 300);
     } catch (err) {
       // Only use the cache when server history is unavailable. A late IndexedDB
       // read must never replace newer messages received from the server.

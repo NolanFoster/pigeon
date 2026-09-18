@@ -57,6 +57,16 @@ Over-limit titles and tags are rejected with HTTP 400 (`title too long` /
 `tags too long`) rather than silently truncated — a publisher who set them
 meant them.
 
+> **Android 16+ audible budget.** On Android 16+, Notification Cooldown
+> (Notification Intelligence in Android 17) gives each app about one
+> full-volume heads-up per minute. Pigeon keeps priority 1–3 silent on the
+> shade so a later priority 5 is not the toast the OS minimizes. Priority 4–5
+> still chime. Use a dedicated `alerts` topic at priority 5 for fire-alarms; do
+> not mix them with compose-restart chatter on the same topic in the same
+> minute. A Copy button on the shade copies the body without opening Pigeon
+> (ntfy iOS 1.7). Pigeon is not exempt from cooldown and is not a priority
+> conversation.
+
 ### API
 
 | Method | Path | Description |

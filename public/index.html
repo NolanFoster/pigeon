@@ -130,6 +130,15 @@
     </div>
   </dialog>
 
+  <dialog id="copy-dialog" class="app-dialog" aria-labelledby="copy-dialog-title">
+    <h2 id="copy-dialog-title" class="app-dialog-title">Copy message</h2>
+    <p class="app-dialog-body">Clipboard access was blocked. Select and copy the text below:</p>
+    <textarea id="copy-dialog-text" class="dialog-input copy-dialog-text" readonly rows="3" spellcheck="false"></textarea>
+    <div class="app-dialog-actions">
+      <button type="button" id="copy-dialog-close" class="btn btn-primary">Close</button>
+    </div>
+  </dialog>
+
   <dialog id="unlock-dialog" class="app-dialog" aria-labelledby="unlock-dialog-title">
     <form id="unlock-form" method="dialog">
       <h2 id="unlock-dialog-title" class="app-dialog-title">Unlock encrypted topic</h2>

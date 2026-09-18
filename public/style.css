@@ -291,6 +291,13 @@ code, pre {
   font: inherit;
 }
 
+.copy-dialog-text {
+  min-height: 6rem;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+}
+
 .app-dialog-actions {
   display: flex;
   justify-content: flex-end;
