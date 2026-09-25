@@ -23,6 +23,7 @@ const SW_SRC = fs.readFileSync(path.join(__dirname, '..', 'public', 'sw.js'), 'u
 
 function loadSW(overrides = {}) {
   const calls = { shown: [], openWindows: [], setAudible: [] };
+  const listeners = {};
 
   const sandbox = {
     importScripts: () => {},
@@ -34,7 +35,7 @@ function loadSW(overrides = {}) {
     clearTimeout,
     Intl,
     Date: { now: () => overrides.now ?? 1_000_000_000 },
-    addEventListener: () => {},
+    addEventListener: (type, handler) => { listeners[type] = handler; },
     skipWaiting: () => {},
     registration: {
       showNotification: async (title, options) => {
@@ -70,7 +71,7 @@ function loadSW(overrides = {}) {
   vm.createContext(sandbox);
   vm.runInContext(SW_SRC, sandbox, { filename: 'sw.js' });
 
-  return { sandbox, calls };
+  return { sandbox, calls, listeners };
 }
 
 function message(overrides = {}) {
@@ -259,4 +260,79 @@ test('truncateUtf8Bytes never splits a code point', () => {
   assert.equal(sandbox.truncateUtf8Bytes('abc', 3), 'abc');
   assert.equal(sandbox.truncateUtf8Bytes('abc', 2), 'ab');
   assert.equal(new TextEncoder().encode(sandbox.truncateUtf8Bytes('a'.repeat(1000), 512)).length, 512);
+});
+
+// ---------------------------------------------------------------------------
+// #53 activation-without-JS: showNotification({ navigate })
+// ---------------------------------------------------------------------------
+
+test('showNotificationFor: topic-only toast gets navigate /?topic=…', async () => {
+  const { sandbox, calls } = loadSW();
+  await sandbox.showNotificationFor(message());
+  assert.equal(calls.shown[0].options.navigate, '/?topic=alerts');
+});
+
+test('showNotificationFor: off-origin https: X-Click becomes navigate', async () => {
+  const { sandbox, calls } = loadSW();
+  await sandbox.showNotificationFor(message({ click: 'https://example.com/incident/42' }));
+  assert.equal(calls.shown[0].options.navigate, 'https://example.com/incident/42');
+});
+
+test('showNotificationFor: javascript: X-Click falls back to /?topic=', async () => {
+  const { sandbox, calls } = loadSW();
+  await sandbox.showNotificationFor(message({ click: 'javascript:alert(1)' }));
+  assert.equal(calls.shown[0].options.navigate, '/?topic=alerts');
+});
+
+test('showNotificationFor: same-origin X-Click opens the topic, not the path', async () => {
+  const { sandbox, calls } = loadSW();
+  await sandbox.showNotificationFor(message({ click: 'https://pigeon.test/some/random/path' }));
+  assert.equal(calls.shown[0].options.navigate, '/?topic=alerts');
+});
+
+test('showNotificationFor: off-origin http: X-Click is dropped', async () => {
+  const { sandbox, calls } = loadSW();
+  await sandbox.showNotificationFor(message({ click: 'http://127.0.0.1:8080/x' }));
+  assert.equal(calls.shown[0].options.navigate, '/?topic=alerts');
+});
+
+test('showNotificationFor: no topic omits navigate', async () => {
+  const { sandbox, calls } = loadSW();
+  await sandbox.showNotificationFor(message({ topic: undefined }));
+  assert.equal(calls.shown[0].options.navigate, undefined);
+});
+
+test('showNotificationFor: encrypted placeholder still gets navigate /?topic=…', async () => {
+  const { sandbox, calls } = loadSW();
+  await sandbox.showNotificationFor({
+    title: '🔒 alerts',
+    body: 'New encrypted message',
+    topic: 'alerts',
+    id: 'msg-1',
+    priority: 5,
+    placeholder: true,
+  });
+  assert.equal(calls.shown[0].options.navigate, '/?topic=alerts');
+});
+
+test('notificationclick: pigeon-copy still runs copyShadeBody without navigate', async () => {
+  const { sandbox, calls, listeners } = loadSW();
+  await sandbox.showNotificationFor(message({ topic: 'alerts' }));
+  const shown = calls.shown[0];
+
+  let pending = Promise.resolve();
+  const event = {
+    action: 'pigeon-copy',
+    notification: {
+      data: shown.options.data,
+      close: () => {},
+    },
+    waitUntil: (p) => { pending = p; },
+  };
+
+  listeners.notificationclick(event);
+  await pending;
+
+  // SW has no clipboard in this harness, so Copy falls back to the consume URL.
+  assert.deepEqual(calls.openWindows, ['/?topic=alerts&copy=1#c=disk2%20needs%20attention']);
 });

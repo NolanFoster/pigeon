@@ -326,6 +326,40 @@ function buildCopyAction(n) {
   return { action: 'pigeon-copy', title: 'Copy' };
 }
 
+// Activation-without-JS contract (#53). Prefer the WHATWG `Notification.navigate`
+// member so a toast carries its own URL and a body-tap opens the topic even when
+// the service worker never runs. Engines that don't implement `navigate` ignore
+// the key and still fire `notificationclick` (the fallback). Action buttons
+// (Copy, later Mute / X-Actions) still fire `notificationclick` with
+// `event.action`, so `navigate` never steals them.
+function navigateFor(n) {
+  if (!n || !n.topic) return null;
+
+  const click = n.click;
+  if (click) {
+    let parsed = null;
+    try {
+      parsed = new URL(click, self.location.origin);
+    } catch {
+      parsed = null;
+    }
+    if (parsed && (parsed.protocol === 'http:' || parsed.protocol === 'https:')) {
+      if (parsed.origin !== self.location.origin) {
+        // Off-origin X-Click: only https: is publisher intent (same gate as
+        // #37 / #40). http: (e.g. http://127.0.0.1) is dropped here.
+        if (parsed.protocol === 'https:') return parsed.href;
+      } else {
+        // Same-origin deep links belong to us; open the topic, never a random
+        // path a publisher stuffed into X-Click.
+        return `/?topic=${encodeURIComponent(n.topic)}`;
+      }
+    }
+    // javascript:, data:, blob:, and unparseable → fall through to the topic URL.
+  }
+
+  return `/?topic=${encodeURIComponent(n.topic)}`;
+}
+
 async function showNotificationFor(n) {
   const priority = normalizePriority(n.priority);
   const decision = await audibleDecision(priority);
@@ -344,6 +378,11 @@ async function showNotificationFor(n) {
 
   const copyAction = buildCopyAction(n);
   if (copyAction) options.actions = [copyAction];
+
+  // The toast itself carries the deep link; notificationclick remains the
+  // fallback for engines that ignore `navigate`.
+  const navigate = navigateFor(n);
+  if (navigate) options.navigate = navigate;
 
   await self.registration.showNotification(n.title, options);
 

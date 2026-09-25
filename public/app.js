@@ -46,6 +46,16 @@ function isE2eeTopic(topic) {
   return !!(state.topicMeta[topic] && state.topicMeta[topic].e2ee);
 }
 
+// Topic names match the server's validate_topic: 1–64 chars, ASCII alnum plus
+// '-' and '_'. Used to decide whether a ?topic= deep link is safe to auto-
+// subscribe to (the same charset the subscribe box accepts).
+function isValidTopicName(topic) {
+  return typeof topic === 'string'
+    && topic.length >= 1
+    && topic.length <= 64
+    && /^[a-zA-Z0-9_-]+$/.test(topic);
+}
+
 // Loads stored passphrase from IDB, caches it for per-envelope decryption,
 // and derives an encryption key for the topic's local meta.salt/iter.
 // Returns true on success.
@@ -505,24 +515,34 @@ function initTopicSortable() {
 }
 
 // Copy-without-open consume path (#50). The service worker has no clipboard, so
-// the Copy shade action opens /?topic=...&copy=1#c=<body>; this runs on load,
-// writes the fragment to the clipboard, toasts, and strips the secret from the
-// URL bar.
-async function consumeCopyFragment() {
-  const params = new URLSearchParams(location.search);
-  if (params.get('copy') !== '1') return;
-  if (!location.hash.startsWith('#c=')) return;
+// the Copy shade action opens /?topic=...&copy=1#c=<body>; this writes the
+// fragment to the clipboard, toasts, and strips the secret (and the one-shot
+// copy flag) from the URL bar. Accepts a URL so the launchQueue path can consume
+// a captured targetURL without re-reading location.
+async function consumeCopyFragment(input) {
+  let url;
+  try {
+    url = input instanceof URL ? input : new URL(input || location.href, location.origin);
+  } catch {
+    url = new URL(location.href);
+  }
+
+  if (url.searchParams.get('copy') !== '1') return;
+  if (!url.hash.startsWith('#c=')) return;
 
   let body;
   try {
-    body = decodeURIComponent(location.hash.slice(3));
+    body = decodeURIComponent(url.hash.slice(3));
   } catch {
     return;
   }
   if (!body) return;
 
-  // Drop the fragment immediately so the secret never lingers in the URL bar.
-  history.replaceState(null, '', location.pathname + location.search);
+  // Drop the fragment and the copy flag immediately so the secret never lingers
+  // in the URL bar. Keep ?topic= so a refresh stays on that stream.
+  url.searchParams.delete('copy');
+  const qs = url.searchParams.toString();
+  history.replaceState(null, '', url.pathname + (qs ? `?${qs}` : ''));
 
   try {
     await navigator.clipboard.writeText(body);
@@ -530,6 +550,50 @@ async function consumeCopyFragment() {
   } catch (err) {
     // Clipboard denied: show the text in a selectable field. Never prompt().
     showCopyFallback(body);
+  }
+}
+
+// Single parser for both the first-paint URL and a captured launchQueue
+// targetURL (#53). Selects ?topic= (subscribing if needed), restores the tag
+// filter, and runs the Copy-without-open consume. Never requests permission or
+// shows a notification — a launch is silent.
+function handleLaunchURL(input) {
+  let url;
+  try {
+    url = input instanceof URL ? input : new URL(input, location.origin);
+  } catch {
+    return;
+  }
+  // Off-origin `navigate` (publisher X-Click) was handled by the UA opening that
+  // site; we must not try to select a topic from a foreign URL.
+  if (url.origin !== location.origin) return;
+
+  // Copy-without-open consume (#50). Load-bearing for the launchQueue path: an
+  // already-open installed PWA won't re-run init(), so Copy's fallback openWindow
+  // is captured onto the existing client and this is the only reader that runs.
+  if (url.searchParams.get('copy') === '1' || url.hash.startsWith('#c=')) {
+    consumeCopyFragment(url);
+  }
+
+  const action = url.searchParams.get('action');
+  const topic = url.searchParams.get('topic');
+
+  // Manifest shortcuts (?action=subscribe / ?action=compose) are handled by
+  // init(); don't eat them when there's no topic to select.
+  if (action && !topic) return;
+
+  if (topic && isValidTopicName(topic)) {
+    const tagsParam = url.searchParams.get('tags');
+    const tags = tagsParam ? tagsParam.split(',').map(t => t.trim()).filter(Boolean) : [];
+    if (tags.length) state.filterTags.set(topic, new Set(tags));
+
+    if (state.topics.includes(topic)) {
+      selectTopic(topic);
+    } else {
+      // A notification for a topic this browser has since forgotten should
+      // still land on that stream, not the last-viewed one.
+      subscribeToTopic(topic, { e2ee: false });
+    }
   }
 }
 
@@ -547,10 +611,11 @@ function showCopyFallback(text) {
 
 // Initialize
 async function init() {
-  // Copy-without-open lands here with the shade body in the URL fragment.
-  // Handle it before async PWA setup so the clipboard write and toast happen
-  // even while the service worker is being installed or updated.
-  await consumeCopyFragment();
+  // One parser for the first-paint deep link (?topic= / ?tags=) and the
+  // Copy-without-open consume path (#50). Run it before async PWA setup so the
+  // clipboard write and topic selection happen even while the service worker is
+  // being installed or updated.
+  handleLaunchURL(location.href);
 
   // Handle launch actions before asynchronous PWA setup. This makes a
   // subscribe shortcut immediately ready for input even while the service
@@ -600,9 +665,10 @@ async function init() {
   state.topics.forEach(topic => connectTopic(topic));
   renderTopicTabs();
 
-  if (state.topics.length > 0) {
-    const restored = restoreFromUrl();
-    if (!restored) selectTopic(state.topics[0]);
+  // handleLaunchURL already selected ?topic= (or subscribed it) above; only
+  // fall back to the first topic when nothing was selected.
+  if (state.topics.length > 0 && !state.activeTopic) {
+    selectTopic(state.topics[0]);
   }
 
   if (launchAction === 'compose' && state.activeTopic) {
@@ -612,6 +678,14 @@ async function init() {
   // If the URL fragment carries a share link (#topic=...&k=...&s=...&i=...),
   // prompt the user to join. Fragments are never sent to the server.
   await maybeJoinFromFragment();
+
+  // launch_handler: focus-existing hands a captured URL to JS instead of
+  // spawning a second window (#53). Feature-detect; do not UA-sniff.
+  if ('launchQueue' in window) {
+    window.launchQueue.setConsumer((launchParams) => {
+      handleLaunchURL(launchParams && launchParams.targetURL);
+    });
+  }
 }
 
 async function maybeJoinFromFragment() {
@@ -1994,18 +2068,6 @@ function syncUrl() {
   else params.delete('tags');
   const qs = params.toString();
   history.replaceState(null, '', location.pathname + (qs ? `?${qs}` : '') + location.hash);
-}
-
-// Restore the topic/filter encoded in ?topic=…&tags=… when still subscribed.
-function restoreFromUrl() {
-  const params = new URLSearchParams(location.search);
-  const topic = params.get('topic');
-  if (!topic || !state.topics.includes(topic)) return false;
-  const tagsParam = params.get('tags');
-  const tags = tagsParam ? tagsParam.split(',').map(t => t.trim()).filter(Boolean) : [];
-  if (tags.length) state.filterTags.set(topic, new Set(tags));
-  selectTopic(topic);
-  return true;
 }
 
 async function toggleTodo(id, topic, done) {

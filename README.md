@@ -67,6 +67,13 @@ meant them.
 > (ntfy iOS 1.7). Pigeon is not exempt from cooldown and is not a priority
 > conversation.
 
+> **Tapping a notification opens the topic.** Engines that support
+> `Notification.navigate` (WHATWG, 2026) go there without running our service
+> worker; everyone else falls back to `notificationclick`. An installed Pigeon
+> declares `launch_handler: focus-existing` so a second tap focuses the window
+> you already have instead of spawning another. Add to Home Screen is still how
+> Chrome 144+ keeps the grant.
+
 ### API
 
 | Method | Path | Description |
