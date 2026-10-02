@@ -336,3 +336,42 @@ test('notificationclick: pigeon-copy still runs copyShadeBody without navigate',
   // SW has no clipboard in this harness, so Copy falls back to the consume URL.
   assert.deepEqual(calls.openWindows, ['/?topic=alerts&copy=1#c=disk2%20needs%20attention']);
 });
+
+// ---------------------------------------------------------------------------
+// #56 delivery proof: shade event time (timestamp) and language (lang)
+// ---------------------------------------------------------------------------
+
+test('showNotificationFor: created_at five hours ago sets timestamp in ms', async () => {
+  const now = 1_000_000_000;
+  const { sandbox, calls } = loadSW({ now });
+  const created = now / 1000 - 5 * 3600; // Unix seconds, five hours ago
+  await sandbox.showNotificationFor(message({ created_at: created }));
+  assert.equal(calls.shown[0].options.timestamp, created * 1000);
+});
+
+test('showNotificationFor: no created_at omits timestamp', async () => {
+  const { sandbox, calls } = loadSW();
+  await sandbox.showNotificationFor(message());
+  assert.equal(calls.shown[0].options.timestamp, undefined);
+});
+
+test('showNotificationFor: out-of-range created_at (zero / far future) is dropped', async () => {
+  const now = 1_000_000_000;
+  const { sandbox, calls } = loadSW({ now });
+  await sandbox.showNotificationFor(message({ created_at: 0 }));
+  assert.equal(calls.shown[0].options.timestamp, undefined);
+  await sandbox.showNotificationFor(message({ created_at: 1e13 }));
+  assert.equal(calls.shown[1].options.timestamp, undefined);
+});
+
+test('showNotificationFor: lang is set only for a valid tag', async () => {
+  const { sandbox, calls } = loadSW();
+  await sandbox.showNotificationFor(message({ language: 'en-GB' }));
+  assert.equal(calls.shown[0].options.lang, 'en-GB');
+});
+
+test('showNotificationFor: invalid lang is omitted, not thrown', async () => {
+  const { sandbox, calls } = loadSW();
+  await sandbox.showNotificationFor(message({ language: 'not a tag' }));
+  assert.equal(calls.shown[0].options.lang, undefined);
+});

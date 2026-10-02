@@ -46,6 +46,7 @@ curl -H "X-Markdown: 1" \
 | `X-Tags` | Comma-separated tags | — | 512 bytes (combined) |
 | `X-Click` | URL to open on notification click | — | — |
 | `X-Markdown` | Set to `1` to enable markdown rendering | 0 | — |
+| `X-Language` | BCP 47 language tag for the message (`en-GB`) | — | one tag, ≤35 chars |
 
 > **Lock Screen copy.** The Lock Screen may rewrite your notification (Apple
 > Intelligence / Chrome on-device ML). Put the fact in `X-Title` (≤50
@@ -55,7 +56,10 @@ curl -H "X-Markdown: 1" \
 
 Over-limit titles and tags are rejected with HTTP 400 (`title too long` /
 `tags too long`) rather than silently truncated — a publisher who set them
-meant them.
+meant them. An invalid `X-Language` is rejected the same way (`language
+invalid`). This names the voice for screen readers and the OS summarizer; it is
+not a translation feature, and there is no per-subscriber language — one
+message, one language.
 
 > **Android 16+ audible budget.** On Android 16+, Notification Cooldown
 > (Notification Intelligence in Android 17) gives each app about one
@@ -88,6 +92,7 @@ meant them.
 | `DELETE` | `/:topic/push/subscribe` | Unregister Web Push subscription for one topic |
 | `DELETE` | `/push/subscribe` | Unregister a push endpoint from **every** topic |
 | `GET` | `/vapid-key` | Get VAPID public key for push setup |
+| `GET` | `/:topic/push/receipts?since=<ts>&id=<msg>` | Delivery receipts since a Unix timestamp (optionally one message); 24-hour window, newest 500 |
 
 Both unsubscribe endpoints take `{"endpoint": "https://…"}` as the body.
 
@@ -104,6 +109,29 @@ purpose:
   worker fetches the full ciphertext from `GET /:topic/messages/:id` to decrypt.
 - **Poll replay** is bounded to the newest 500 messages (or 1 MB of JSON), with
   `X-Messages-Truncated: 1` signalling a cut.
+
+### Delivery receipts
+
+`POST /:topic` returns immediately with `X-Message-Id`, `X-Push-Attempted` (how
+many subscribers the fan-out attempted) and, when there was at least one
+subscriber, `X-Push-Receipts` — a URL to poll for the outcome:
+
+```bash
+curl -D - -d "Backup failed" https://your-worker.dev/alerts
+# X-Message-Id: <uuid>
+# X-Push-Attempted: 3
+# X-Push-Receipts: /alerts/push/receipts?id=<uuid>
+
+curl "https://your-worker.dev/alerts/push/receipts?since=$(date +%s)&id=<uuid>"
+```
+
+Each receipt is one row per attempted endpoint: `accepted`, `gone`,
+`throttled`, `too-large`, or `rejected` (plus the push service's HTTP status).
+Receipts are an operational signal, not an archive — `since` must be within the
+last 24 hours, and rows older than 24 hours are deleted at the start of the
+next publish to that topic (capped at 200 per publish). Like `GET /:topic/json`,
+knowing the topic is the credential; the endpoint URL and its hash are never
+returned, so don't "fix" the lack of a token by adding one.
 
 ### Turning push notifications off
 
@@ -186,6 +214,22 @@ Each message card has an edit (pencil) button. Editing pre-fills the compose box
    npx wrangler secret put VAPID_PRIVATE_KEY
    ```
 
+#### Rotating the VAPID key
+
+`GET /vapid-key` returns the key *derived from* `VAPID_PRIVATE_KEY`, so the
+browser is always handed the key the worker will actually sign with. To rotate:
+
+```bash
+npx wrangler secret put VAPID_PRIVATE_KEY   # paste the new base64url private key
+npx wrangler deploy
+```
+
+The next time each subscribed browser opens Pigeon it compares its stored
+`applicationServerKey` to the new key and resubscribes against it automatically
+(no prompt). Old subscriptions 410-prune themselves on the next send. Remove or
+update the `VAPID_PUBLIC_KEY` entry in `[vars]` so it doesn't mislead — it is
+only a local-dev fallback when the secret is absent.
+
 5. **Update `wrangler.toml`:**
 
    Set `VAPID_SUBJECT` to your `mailto:` address. The `VAPID_PUBLIC_KEY` is derived from the private key at runtime, but you can set it in `[vars]` for reference.
@@ -219,7 +263,7 @@ Client (curl/app)                    Browser (PWA)
 |  TopicRoom (Durable Object, per-topic)                               |
 |  +- In-memory WebSocket fan-out                                      |
 +----------------------------------------------------------------------+
-|  D1 (SQLite): messages, push_subscriptions                           |
+|  D1 (SQLite): messages, push_subscriptions, push_receipts            |
 +----------------------------------------------------------------------+
 ```
 

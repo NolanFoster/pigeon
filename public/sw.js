@@ -125,6 +125,10 @@ async function buildNotification(data) {
           topic: data.topic,
           id: data.id,
           priority: data.priority,
+          // Event time is the server's outer stamp (not secret), never a value
+          // from inside `ct`; language lives in the sealed fields for E2EE.
+          created_at: data.created_at,
+          language: fields.language,
         });
       } catch (err) {
         console.warn('SW decrypt failed:', err);
@@ -184,6 +188,8 @@ function buildPlaintext(data) {
       topic: data.topic,
       id: data.id,
       priority,
+      created_at: data.created_at,
+      language: data.language,
     };
   }
 
@@ -195,6 +201,8 @@ function buildPlaintext(data) {
       topic: data.topic,
       id: data.id,
       priority,
+      created_at: data.created_at,
+      language: data.language,
     };
   }
 
@@ -210,6 +218,8 @@ function buildPlaintext(data) {
     topic: data.topic,
     id: data.id,
     priority,
+    created_at: data.created_at,
+    language: data.language,
   };
 }
 
@@ -221,6 +231,7 @@ function genericEncrypted(data) {
     id: data.id,
     priority: normalizePriority(data.priority),
     placeholder: true,
+    created_at: data.created_at,
   };
 }
 
@@ -254,6 +265,8 @@ async function tryFetchAndDecrypt(data) {
       topic: data.topic,
       id: data.id,
       priority: data.priority,
+      created_at: data.created_at,
+      language: fields.language,
     });
   } catch (err) {
     console.warn('SW thin-push upgrade failed:', err);
@@ -360,6 +373,29 @@ function navigateFor(n) {
   return `/?topic=${encodeURIComponent(n.topic)}`;
 }
 
+// BCP 47-ish tag the server (and, for E2EE, the sealing client) validated.
+// showNotification rejects a bad `lang` on some engines, and a thrown options
+// bag fails the whole toast — so a value that fails is omitted, not thrown.
+const LANGUAGE_TAG_RE = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$/;
+
+function validLanguageTag(lang) {
+  return typeof lang === 'string' && lang.length <= 35 && LANGUAGE_TAG_RE.test(lang);
+}
+
+// `showNotification.timestamp` is Unix milliseconds; our created_at is Unix
+// seconds. Return the event time in ms clamped to [now - 7d, now + 5min].
+// Out-of-range stamps are dropped (undefined), not clamped — clamping a future
+// or ancient stamp would still be a lie. No stamp means "delivery time", which
+// is correct for a message that genuinely just happened.
+function eventTimestampMs(n) {
+  const created = n && n.created_at;
+  if (!Number.isFinite(created)) return undefined;
+  const ms = created * 1000;
+  const now = Date.now();
+  if (ms < now - 7 * 86400_000 || ms > now + 5 * 60_000) return undefined;
+  return ms;
+}
+
 async function showNotificationFor(n) {
   const priority = normalizePriority(n.priority);
   const decision = await audibleDecision(priority);
@@ -375,6 +411,13 @@ async function showNotificationFor(n) {
     // so carry the shade copy on the data object for the Copy action.
     data: { click: n.click, topic: n.topic, body: n.body, title: n.title, id: n.id },
   };
+
+  // Event time on the shade (#56): a late toast shows when the event happened,
+  // not when the radio woke up. Language names the voice for screen readers and
+  // the OS summarizer; an invalid stored tag is omitted rather than thrown.
+  const timestamp = eventTimestampMs(n);
+  if (timestamp !== undefined) options.timestamp = timestamp;
+  if (validLanguageTag(n.language)) options.lang = n.language;
 
   const copyAction = buildCopyAction(n);
   if (copyAction) options.actions = [copyAction];

@@ -1,11 +1,12 @@
 pub mod encrypt;
 pub mod vapid;
 
+use sha2::{Digest, Sha256};
 use worker::*;
 use worker::wasm_bindgen::JsValue;
 
 use crate::db;
-use crate::models::{validate_push_endpoint, Message};
+use crate::models::{validate_push_endpoint, Message, PushSubscriptionRecord};
 
 enum PushError {
     Gone,
@@ -26,10 +27,41 @@ pub const PUSH_PAYLOAD_MAX_BYTES: usize = 3500;
 const MESSAGE_TRUNCATE_BYTES: usize = 240;
 const TITLE_TRUNCATE_BYTES: usize = 120;
 
-pub async fn send_push_to_topic(env: &Env, msg: &Message) -> Result<()> {
+/// Load the subscriptions a publish will attempt, pruning rows whose endpoint
+/// is no longer on the push-service allowlist (defence in depth: rows inserted
+/// before the subscribe-time allowlist landed). The returned count is what the
+/// publish response reports as `X-Push-Attempted`, so it must be computed
+/// before any push-service round trip begins.
+pub async fn prepare_subscriptions(
+    env: &Env,
+    topic: &str,
+) -> Result<Vec<PushSubscriptionRecord>> {
     let db = env.d1("DB")?;
-    let subscriptions = db::get_push_subscriptions(&db, &msg.topic).await?;
+    let subscriptions = db::get_push_subscriptions(&db, topic).await?;
 
+    let mut valid = Vec::with_capacity(subscriptions.len());
+    for sub in subscriptions {
+        if validate_push_endpoint(&sub.endpoint).is_err() {
+            console_log!("Skipping push to non-allowlisted endpoint {}", &sub.endpoint);
+            if let Err(e) = db::delete_push_subscription(&db, topic, &sub.endpoint).await {
+                console_log!("Failed to delete bad subscription: {:?}", e);
+            }
+            continue;
+        }
+        valid.push(sub);
+    }
+    Ok(valid)
+}
+
+/// Fan out one message to the prepared subscriptions. Each attempted endpoint
+/// produces exactly one receipt row reflecting its final outcome; the publish
+/// response does not wait on this.
+pub async fn send_push_to_topic(
+    env: &Env,
+    msg: &Message,
+    subscriptions: &[PushSubscriptionRecord],
+) -> Result<()> {
+    let db = env.d1("DB")?;
     if subscriptions.is_empty() {
         return Ok(());
     }
@@ -42,16 +74,7 @@ pub async fn send_push_to_topic(env: &Env, msg: &Message) -> Result<()> {
     // service gets a size-bounded envelope instead of `serde_json::to_vec(msg)`.
     let payload = push_payload(msg, None);
 
-    for sub in &subscriptions {
-        // Defence in depth: rows inserted before the subscribe-time allowlist
-        // landed could still point at arbitrary URLs. Skip them.
-        if validate_push_endpoint(&sub.endpoint).is_err() {
-            console_log!("Skipping push to non-allowlisted endpoint {}", &sub.endpoint);
-            if let Err(e) = db::delete_push_subscription(&db, &msg.topic, &sub.endpoint).await {
-                console_log!("Failed to delete bad subscription: {:?}", e);
-            }
-            continue;
-        }
+    for sub in subscriptions {
         match send_single_push(
             &sub.endpoint,
             &sub.p256dh,
@@ -63,17 +86,18 @@ pub async fn send_push_to_topic(env: &Env, msg: &Message) -> Result<()> {
         )
         .await
         {
-            Ok(_) => {}
+            Ok(status) => write_receipt(&db, msg, sub, "accepted", Some(status as i64)).await,
             Err(PushError::PayloadTooLarge) => {
                 // One retry with a tiny payload that cannot exceed the budget.
                 // 410 is the only status that prunes; a 413/400 size rejection
-                // keeps the subscription and the D1 row.
+                // keeps the subscription and the D1 row. The receipt records the
+                // retry's outcome — one attempt, one row, until #55 upserts.
                 console_log!(
                     "Push payload too large for {}; retrying with generic payload",
                     &sub.endpoint
                 );
                 let generic = generic_retry_payload(msg);
-                if let Err(e) = send_single_push(
+                match send_single_push(
                     &sub.endpoint,
                     &sub.p256dh,
                     &sub.auth,
@@ -84,35 +108,113 @@ pub async fn send_push_to_topic(env: &Env, msg: &Message) -> Result<()> {
                 )
                 .await
                 {
-                    log_push_error(&db, &msg.topic, &sub.endpoint, e).await;
+                    Ok(status) => {
+                        write_receipt(&db, msg, sub, "accepted", Some(status as i64)).await
+                    }
+                    Err(e) => handle_push_error(&db, msg, sub, e).await,
                 }
             }
-            Err(e) => log_push_error(&db, &msg.topic, &sub.endpoint, e).await,
+            Err(e) => handle_push_error(&db, msg, sub, e).await,
         }
     }
 
     Ok(())
 }
 
-async fn log_push_error(db: &worker::D1Database, topic: &str, endpoint: &str, err: PushError) {
+/// Map a push-service outcome to one of the five receipt status words. This is
+/// the contract; no other word may be stored.
+fn receipt_status(err: &PushError) -> &'static str {
     match err {
+        PushError::Gone | PushError::NotFound => "gone",
+        PushError::PayloadTooLarge => "too-large",
+        PushError::HttpStatus(429) | PushError::HttpStatus(503) => "throttled",
+        PushError::HttpStatus(_) => "rejected",
+        PushError::Worker(_) => "rejected",
+    }
+}
+
+/// The push-service status to record, or None when the failure happened before
+/// the service answered (a `Fetch` error).
+fn error_http_status(err: &PushError) -> Option<i64> {
+    match err {
+        PushError::Gone => Some(410),
+        PushError::NotFound => Some(404),
+        PushError::PayloadTooLarge => Some(413),
+        PushError::HttpStatus(s) => Some(*s as i64),
+        PushError::Worker(_) => None,
+    }
+}
+
+/// sha256 of the endpoint, hex-encoded. The endpoint is a capability
+/// credential, so the receipt table stores the hash and never the URL.
+fn endpoint_hash(endpoint: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(endpoint.as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for b in digest {
+        hex.push_str(&format!("{:02x}", b));
+    }
+    hex
+}
+
+async fn write_receipt(
+    db: &worker::D1Database,
+    msg: &Message,
+    sub: &PushSubscriptionRecord,
+    status: &str,
+    http_status: Option<i64>,
+) {
+    let now = (Date::now().as_millis() / 1000) as i64;
+    if let Err(e) = db::insert_push_receipt(
+        db,
+        &msg.id,
+        &msg.topic,
+        &endpoint_hash(&sub.endpoint),
+        status,
+        http_status,
+        now,
+    )
+    .await
+    {
+        console_log!("Failed to write push receipt: {:?}", e);
+    }
+}
+
+async fn handle_push_error(
+    db: &worker::D1Database,
+    msg: &Message,
+    sub: &PushSubscriptionRecord,
+    err: PushError,
+) {
+    match &err {
         PushError::Gone | PushError::NotFound => {
-            console_log!("Removing expired push subscription for {}", endpoint);
-            if let Err(e) = db::delete_push_subscription(db, topic, endpoint).await {
+            console_log!("Removing expired push subscription for {}", sub.endpoint);
+            if let Err(e) = db::delete_push_subscription(db, &msg.topic, &sub.endpoint).await {
                 console_log!("Failed to delete expired subscription: {:?}", e);
             }
         }
         PushError::PayloadTooLarge => {
             // Shouldn't happen (the generic payload fits), but never prune on size.
-            console_log!("Web Push payload still too large for {}", endpoint);
+            console_log!("Web Push payload still too large for {}", sub.endpoint);
         }
-        PushError::HttpStatus(status) => {
-            console_log!("Web Push failed for {} with status {}", endpoint, status);
+        PushError::HttpStatus(s) => {
+            if *s == 401 || *s == 403 {
+                // A signature rejection means OUR VAPID key changed, not that the
+                // endpoint is dead — never prune. Until #55 grows a `stale-key`
+                // status this stays `rejected`; log the word so rotation failures
+                // are visible.
+                console_log!("stale-key: Web Push rejected {} with status {}", sub.endpoint, s);
+            } else {
+                console_log!("Web Push failed for {} with status {}", sub.endpoint, s);
+            }
         }
         PushError::Worker(e) => {
-            console_log!("Web Push error for {}: {:?}", endpoint, e);
+            console_log!("Web Push error for {}: {:?}", sub.endpoint, e);
         }
     }
+
+    write_receipt(db, msg, sub, receipt_status(&err), error_http_status(&err)).await;
 }
 
 /// Build the thin push payload for one message.
@@ -175,6 +277,9 @@ fn build_plaintext_payload(msg: &Message) -> Vec<u8> {
         if let Some(click) = &msg.click {
             map.insert("click".into(), serde_json::json!(click));
         }
+        if let Some(lang) = &msg.language {
+            map.insert("language".into(), serde_json::json!(lang));
+        }
     }
 
     let mut bytes = serde_json::to_vec(&obj).unwrap_or_default();
@@ -213,7 +318,8 @@ fn build_e2ee_payload(msg: &Message) -> Vec<u8> {
     // The server cannot truncate `ct` (that breaks decrypt) and cannot put
     // plaintext in `notification.*`. Include `ct` only if the full envelope
     // still fits; otherwise omit it and let the service worker upgrade by
-    // fetching GET /:topic/messages/:id.
+    // fetching GET /:topic/messages/:id. `language` is NOT carried here — for
+    // E2EE it lives inside the ciphertext and the server never sees it.
     let with_ct = serde_json::json!({
         "id": msg.id,
         "topic": msg.topic,
@@ -265,7 +371,7 @@ async fn send_single_push(
     vapid_private_key: &str,
     vapid_public_key: &str,
     vapid_subject: &str,
-) -> std::result::Result<(), PushError> {
+) -> std::result::Result<u16, PushError> {
     let encrypted = encrypt::encrypt_payload(payload, p256dh, auth).map_err(PushError::Worker)?;
     let auth_header =
         vapid::build_vapid_header(endpoint, vapid_private_key, vapid_public_key, vapid_subject)
@@ -302,7 +408,7 @@ async fn send_single_push(
         return Err(PushError::HttpStatus(status));
     }
     console_log!("Push sent successfully (status {})", status);
-    Ok(())
+    Ok(status)
 }
 
 fn looks_like_payload_too_large(body: &str) -> bool {
@@ -330,6 +436,7 @@ mod tests {
             image: None,
             markdown: false,
             encrypted: false,
+            language: None,
             created_at: 1710000000,
         }
     }
@@ -388,5 +495,54 @@ mod tests {
         let payload = push_payload(&m, None);
         let v: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(v["ct"].as_str().unwrap(), "short");
+    }
+
+    #[test]
+    fn plaintext_push_carries_language() {
+        let m = Message {
+            language: Some("en-GB".to_string()),
+            ..base("hi")
+        };
+        let payload = push_payload(&m, None);
+        let v: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(v["language"], serde_json::json!("en-GB"));
+    }
+
+    #[test]
+    fn e2ee_push_omits_language() {
+        let m = Message {
+            encrypted: true,
+            language: Some("en-GB".to_string()),
+            message: "short".to_string(),
+            ..base("")
+        };
+        let payload = push_payload(&m, None);
+        let v: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert!(v.get("language").is_none(), "E2EE language lives in the ciphertext");
+    }
+
+    #[test]
+    fn receipt_status_maps_410_to_gone_and_429_to_throttled() {
+        assert_eq!(receipt_status(&PushError::Gone), "gone");
+        assert_eq!(receipt_status(&PushError::NotFound), "gone");
+        assert_eq!(receipt_status(&PushError::PayloadTooLarge), "too-large");
+        assert_eq!(receipt_status(&PushError::HttpStatus(429)), "throttled");
+        assert_eq!(receipt_status(&PushError::HttpStatus(503)), "throttled");
+        // 401/403 stay "rejected" today (a `stale-key` status is #55's
+        // classifier), never "gone" — pruning on a signature error deletes a
+        // good endpoint because OUR key changed.
+        assert_eq!(receipt_status(&PushError::HttpStatus(401)), "rejected");
+        assert_eq!(receipt_status(&PushError::HttpStatus(403)), "rejected");
+        assert_eq!(receipt_status(&PushError::HttpStatus(500)), "rejected");
+    }
+
+    #[test]
+    fn endpoint_hash_is_stable_sha256_hex() {
+        let endpoint = "https://fcm.googleapis.com/fcm/send/abc";
+        let h = endpoint_hash(endpoint);
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(h, endpoint_hash(endpoint));
+        assert_ne!(h, endpoint_hash("https://fcm.googleapis.com/fcm/send/def"));
     }
 }

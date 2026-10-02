@@ -1,7 +1,7 @@
 use worker::*;
 use crate::models::validate_topic;
 
-pub async fn handle(req: Request, ctx: RouteContext<()>) -> Result<Response> {
+pub async fn handle(req: Request, ctx: RouteContext<Context>) -> Result<Response> {
     let topic = ctx.param("topic").unwrap().to_string();
     validate_topic(&topic)?;
 

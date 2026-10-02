@@ -1,7 +1,7 @@
 use worker::*;
 use worker::wasm_bindgen::JsValue;
 
-use crate::models::{Message, PushSubscriptionRecord};
+use crate::models::{Message, PushReceipt, PushSubscriptionRecord};
 
 // Replay bound (ntfy 2.28 parity): never return an unbounded topic. The SQL
 // below asks for one extra row (LIMIT 501) so callers can detect truncation
@@ -10,8 +10,8 @@ const REPLAY_MAX: usize = 500;
 
 pub async fn insert_message(db: &D1Database, msg: &Message) -> Result<()> {
     let stmt = db.prepare(
-        "INSERT INTO messages (id, topic, title, message, priority, tags, click, image, markdown, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO messages (id, topic, title, message, priority, tags, click, image, markdown, language, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     );
     stmt.bind(&[
         JsValue::from_str(&msg.id),
@@ -23,6 +23,7 @@ pub async fn insert_message(db: &D1Database, msg: &Message) -> Result<()> {
         msg.click.as_deref().map_or(JsValue::NULL, JsValue::from_str),
         msg.image.as_deref().map_or(JsValue::NULL, JsValue::from_str),
         JsValue::from(if msg.markdown { 1.0 } else { 0.0 }),
+        msg.language.as_deref().map_or(JsValue::NULL, JsValue::from_str),
         JsValue::from(msg.created_at as f64),
     ])?
     .run()
@@ -49,7 +50,7 @@ pub async fn get_messages_since(
         // the second-granularity created_at), keep the newest, reverse to
         // ascending for the client.
         let stmt = db.prepare(
-            "SELECT id, topic, title, message, priority, tags, click, image, markdown, created_at
+            "SELECT id, topic, title, message, priority, tags, click, image, markdown, language, created_at
              FROM messages WHERE topic = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 501",
         );
         let result = stmt.bind(&[JsValue::from_str(topic)])?.all().await?;
@@ -66,7 +67,7 @@ pub async fn get_messages_since(
         // Forward from the cursor, stop at the cap so a cursor-holding client
         // never skips.
         let stmt = db.prepare(
-            "SELECT id, topic, title, message, priority, tags, click, image, markdown, created_at
+            "SELECT id, topic, title, message, priority, tags, click, image, markdown, language, created_at
              FROM messages WHERE topic = ?1 AND created_at > ?2 ORDER BY created_at ASC, rowid ASC LIMIT 501",
         );
         let result = stmt
@@ -90,7 +91,7 @@ pub async fn get_message(
     id: &str,
 ) -> Result<Option<Message>> {
     let stmt = db.prepare(
-        "SELECT id, topic, title, message, priority, tags, click, image, markdown, created_at
+        "SELECT id, topic, title, message, priority, tags, click, image, markdown, language, created_at
          FROM messages WHERE topic = ?1 AND id = ?2 LIMIT 1",
     );
     let result = stmt
@@ -184,6 +185,94 @@ pub async fn delete_push_subscriptions_by_endpoint(
     Ok(())
 }
 
+/// Record one delivery attempt. The endpoint is stored only as a sha256 hash —
+/// never the URL itself. One attempt is one row until #55's deferred retry
+/// lands; that retry will upsert on (message_id, endpoint_hash) instead of
+/// inserting a second row.
+pub async fn insert_push_receipt(
+    db: &D1Database,
+    message_id: &str,
+    topic: &str,
+    endpoint_hash: &str,
+    status: &str,
+    http_status: Option<i64>,
+    created_at: i64,
+) -> Result<()> {
+    let stmt = db.prepare(
+        "INSERT INTO push_receipts (message_id, topic, endpoint_hash, status, http_status, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    );
+    stmt.bind(&[
+        JsValue::from_str(message_id),
+        JsValue::from_str(topic),
+        JsValue::from_str(endpoint_hash),
+        JsValue::from_str(status),
+        http_status.map_or(JsValue::NULL, JsValue::from),
+        JsValue::from(created_at as f64),
+    ])?
+    .run()
+    .await?;
+    Ok(())
+}
+
+/// Read receipts for a topic since a cursor, optionally filtered to one message
+/// id. Newest last (ascending), capped at the newest 500 rows. Only the public
+/// fields are selected — the endpoint hash never leaves the table.
+pub async fn get_push_receipts(
+    db: &D1Database,
+    topic: &str,
+    since: i64,
+    message_id: Option<&str>,
+) -> Result<Vec<PushReceipt>> {
+    // LIMIT is inlined (a compile-time constant) rather than bound — keeps the
+    // query's bind count unambiguous across the two shapes.
+    let query = if message_id.is_some() {
+        "SELECT message_id, topic, status, http_status, created_at
+         FROM push_receipts
+         WHERE topic = ?1 AND created_at >= ?2 AND message_id = ?3
+         ORDER BY created_at DESC, id DESC LIMIT 500"
+    } else {
+        "SELECT message_id, topic, status, http_status, created_at
+         FROM push_receipts
+         WHERE topic = ?1 AND created_at >= ?2
+         ORDER BY created_at DESC, id DESC LIMIT 500"
+    };
+
+    let mut binds: Vec<JsValue> = vec![
+        JsValue::from_str(topic),
+        JsValue::from(since as f64),
+    ];
+    if let Some(mid) = message_id {
+        binds.push(JsValue::from_str(mid));
+    }
+
+    let stmt = db.prepare(query).bind(&binds)?;
+    let result = stmt.all().await?;
+    let rows: Vec<PushReceiptRow> = result.results()?;
+
+    // DESC query keeps the newest; reverse so the JSON array is newest-last.
+    let mut receipts: Vec<PushReceipt> = rows.into_iter().map(|r| r.into()).collect();
+    receipts.reverse();
+    Ok(receipts)
+}
+
+/// Opportunistic retention: receipts older than 24 hours are deleted at the
+/// start of a publish to their topic. The `id IN (SELECT … LIMIT 200)` cap keeps
+/// a long-neglected topic from turning one publish into a table scan. No cron,
+/// no Queue — this rides the publish that already touches the table.
+pub async fn prune_old_push_receipts(db: &D1Database, topic: &str, cutoff: i64) -> Result<()> {
+    let stmt = db.prepare(
+        "DELETE FROM push_receipts
+         WHERE id IN (
+             SELECT id FROM push_receipts WHERE topic = ?1 AND created_at < ?2 LIMIT 200
+         )",
+    );
+    stmt.bind(&[JsValue::from_str(topic), JsValue::from(cutoff as f64)])?
+        .run()
+        .await?;
+    Ok(())
+}
+
 /// Internal row type for D1 deserialization
 #[derive(serde::Deserialize)]
 struct MessageRow {
@@ -196,6 +285,7 @@ struct MessageRow {
     click: Option<String>,
     image: Option<String>,
     markdown: i32,
+    language: Option<String>,
     created_at: i64,
 }
 
@@ -214,6 +304,30 @@ impl From<MessageRow> for Message {
             // No persisted column; the client detects encryption by inspecting
             // the envelope shape of `message`.
             encrypted: false,
+            language: row.language,
+            created_at: row.created_at,
+        }
+    }
+}
+
+/// Internal row type for receipt deserialization (the public shape omits the
+/// endpoint hash, which is never selected on the read path).
+#[derive(serde::Deserialize)]
+struct PushReceiptRow {
+    message_id: String,
+    topic: String,
+    status: String,
+    http_status: Option<i64>,
+    created_at: i64,
+}
+
+impl From<PushReceiptRow> for PushReceipt {
+    fn from(row: PushReceiptRow) -> Self {
+        PushReceipt {
+            message_id: row.message_id,
+            topic: row.topic,
+            status: row.status,
+            http_status: row.http_status,
             created_at: row.created_at,
         }
     }
