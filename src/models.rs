@@ -11,6 +11,26 @@ pub fn validate_topic(topic: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate the optional `X-Language` header: a single BCP 47 tag, at most 35
+/// characters, matching `^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$`. A publisher who
+/// set it meant it, so anything else is rejected (400) rather than dropped.
+pub fn valid_language_tag(tag: &str) -> bool {
+    if tag.is_empty() || tag.len() > 35 {
+        return false;
+    }
+    let mut parts = tag.split('-');
+    let primary = parts.next().unwrap_or("");
+    if !(2..=3).contains(&primary.len()) || !primary.chars().all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    for sub in parts {
+        if sub.is_empty() || sub.len() > 8 || !sub.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Hosts whose suffixes we trust to be real Web Push services. Anything else
 /// would let `/topic/push/subscribe` turn the worker into a generic HTTP-POST
 /// amplifier (an attacker registers an arbitrary URL, then every published
@@ -75,6 +95,11 @@ pub struct Message {
     // none of the content headers (title/tags/click/image) were honoured.
     #[serde(default, skip_serializing_if = "is_false")]
     pub encrypted: bool,
+    // The publisher's BCP 47 language for this message (X-Language). Carried on
+    // the thin plaintext push payload; for E2EE it lives inside the ciphertext
+    // and the server never sees it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     pub created_at: i64,
 }
 
@@ -87,6 +112,19 @@ pub struct PushSubscriptionRecord {
     pub endpoint: String,
     pub p256dh: String,
     pub auth: String,
+    pub created_at: i64,
+}
+
+/// One row of `GET /:topic/push/receipts`. Deliberately has no endpoint, no
+/// endpoint_hash and no p256dh — the endpoint is a capability credential and
+/// must not be echoed to whoever happens to know the topic.
+#[derive(Debug, Clone, Serialize)]
+pub struct PushReceipt {
+    pub message_id: String,
+    pub topic: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<i64>,
     pub created_at: i64,
 }
 
@@ -107,4 +145,35 @@ pub struct PushKeys {
 #[derive(Debug, Deserialize)]
 pub struct PushUnsubscribeRequest {
     pub endpoint: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn language_tag_accepts_bcp47_and_rejects_empty_and_url() {
+        assert!(valid_language_tag("en"));
+        assert!(valid_language_tag("en-GB"));
+        assert!(valid_language_tag("zh-Hant-TW"));
+        assert!(valid_language_tag("pt-BR"));
+        // Empty tag.
+        assert!(!valid_language_tag(""));
+        // A URL is not a language tag.
+        assert!(!valid_language_tag("https://example.com"));
+        // A phrase with a space.
+        assert!(!valid_language_tag("not a tag"));
+        // Too short / too long primary.
+        assert!(!valid_language_tag("e"));
+        assert!(!valid_language_tag("abcd"));
+        // Digits are not a primary subtag.
+        assert!(!valid_language_tag("1234"));
+        // 36 characters.
+        assert!(!valid_language_tag(&"a".repeat(36)));
+        // Trailing dash produces an empty subtag.
+        assert!(!valid_language_tag("en-"));
+        // Subtags are capped at 8 alphanumeric chars.
+        assert!(!valid_language_tag("en-abcdefghi"));
+        assert!(valid_language_tag("en-abcdefgh"));
+    }
 }

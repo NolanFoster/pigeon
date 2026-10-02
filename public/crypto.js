@@ -60,7 +60,7 @@ const IV_BYTES = 12;
     );
   }
 
-  // fields: { title?, message, tags?, click?, image?, markdown? }
+  // fields: { title?, message, tags?, click?, image?, markdown?, language? }
   // Returns the envelope JSON string (to be sent as the HTTP body).
   async function encryptFields(key, fields, saltB64u, iterations) {
     const iv = randomBytes(IV_BYTES);

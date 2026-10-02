@@ -8,7 +8,7 @@ use crate::models::validate_topic;
 // is more than a Worker should buffer for a single poll.
 const MAX_JSON_BYTES: usize = 1_000_000;
 
-pub async fn handle(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
+pub async fn handle(_req: Request, ctx: RouteContext<Context>) -> Result<Response> {
     let topic = ctx.param("topic").unwrap();
     validate_topic(topic)?;
 
@@ -53,7 +53,7 @@ pub async fn handle(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
 /// Single-message fetch, used by the service worker to upgrade a thin E2EE push
 /// whose `ct` was omitted for size. Same capability-URL security as the poll
 /// route: knowing the topic is enough.
-pub async fn get_one(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
+pub async fn get_one(_req: Request, ctx: RouteContext<Context>) -> Result<Response> {
     let topic = ctx.param("topic").unwrap().to_string();
     validate_topic(&topic)?;
     let id = ctx.param("id").unwrap().to_string();
@@ -65,7 +65,7 @@ pub async fn get_one(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
     }
 }
 
-pub async fn delete(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
+pub async fn delete(_req: Request, ctx: RouteContext<Context>) -> Result<Response> {
     let topic = ctx.param("topic").unwrap();
     validate_topic(topic)?;
     let d1 = ctx.env.d1("DB")?;
@@ -73,7 +73,7 @@ pub async fn delete(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
     Response::ok("deleted")
 }
 
-pub async fn delete_one(_req: Request, ctx: RouteContext<()>) -> Result<Response> {
+pub async fn delete_one(_req: Request, ctx: RouteContext<Context>) -> Result<Response> {
     let topic = ctx.param("topic").unwrap().to_string();
     validate_topic(&topic)?;
     let id = ctx.param("id").unwrap().to_string();

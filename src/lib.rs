@@ -84,7 +84,7 @@ fn serve_static(content: &str, content_type: &str) -> Result<Response> {
 }
 
 #[event(fetch, respond_with_errors)]
-async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     console_error_panic_hook::set_once();
 
     let path = req.path();
@@ -151,21 +151,15 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             apply_security_headers(&headers)?;
             return Ok(Response::from_bytes(data.to_vec())?.with_headers(headers));
         }
-        "/vapid-key" => {
-            let private_key = env.secret("VAPID_PRIVATE_KEY")?.to_string();
-            let public_key = webpush::vapid::get_public_key_b64(&private_key)?;
-            let resp = Response::ok(public_key)?;
-            apply_security_headers(resp.headers())?;
-            return Ok(resp);
-        }
         _ => {}
     }
 
-    let resp = Router::new()
+    let resp = Router::with_data(ctx)
         .get_async("/vapid-key", routes::push::vapid_key)
         .post_async("/:topic", routes::publish::handle)
         .get_async("/:topic/json", routes::poll::handle)
         .get_async("/:topic/messages/:id", routes::poll::get_one)
+        .get_async("/:topic/push/receipts", routes::push::receipts)
         .get_async("/:topic/sse", routes::subscribe::handle)
         .delete_async("/:topic/messages", routes::poll::delete)
         .delete_async("/:topic/messages/:id", routes::poll::delete_one)

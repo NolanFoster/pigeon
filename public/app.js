@@ -137,6 +137,7 @@ async function tryDecryptMessage(topic, msg) {
     if (typeof fields.tags === 'string') msg.tags = fields.tags;
     if (typeof fields.click === 'string') msg.click = fields.click;
     if (typeof fields.image === 'string') msg.image = fields.image;
+    if (typeof fields.language === 'string') msg.language = fields.language;
     if (typeof fields.markdown === 'boolean') msg.markdown = fields.markdown;
     msg._decrypted = true;
     delete msg._locked;
@@ -637,10 +638,28 @@ async function init() {
     if (existing && pushPrefEnabled()) {
       state.pushEnabled = true;
       state.pushSubscription = existing;
-      // Re-register push for all topics (idempotent via INSERT OR REPLACE on server)
-      Promise.all(
-        state.topics.map(topic => registerPushForTopic(topic, existing))
-      ).catch(err => console.error('Push re-registration failed:', err));
+      try {
+        // VAPID rotation (#56): resubscribe against the current key when the
+        // browser's applicationServerKey no longer matches. Runs on the
+        // existing grant — never a new prompt.
+        state.pushSubscription = await resubscribeIfKeyRotated(reg, existing);
+      } catch (err) {
+        console.error('VAPID rotation failed:', err);
+        // The browser subscription may be gone after a half-rotation; surface
+        // the existing re-enable path rather than re-registering a dead endpoint.
+        state.pushEnabled = false;
+        state.pushSubscription = null;
+        toastError("Push notifications couldn't be re-enabled after a key change.", {
+          actionLabel: 'Retry',
+          onAction: () => enablePush(),
+        });
+      }
+      if (state.pushSubscription) {
+        // Re-register push for all topics (idempotent via INSERT OR REPLACE on server)
+        Promise.all(
+          state.topics.map(topic => registerPushForTopic(topic, state.pushSubscription))
+        ).catch(err => console.error('Push re-registration failed:', err));
+      }
     } else if (existing) {
       // Push is off but a live subscription is still out there — a teardown
       // that was interrupted, or one the browser undid. Every reload used to
@@ -3193,6 +3212,50 @@ function urlBase64ToUint8Array(base64String) {
   const arr = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
   return arr;
+}
+
+function bytesEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+async function fetchVapidKeyBytes() {
+  const res = await apiFetch('/vapid-key');
+  const text = await res.text();
+  return urlBase64ToUint8Array(text.trim());
+}
+
+// VAPID rotation (#56). A subscription is bound to the applicationServerKey it
+// was created with; rotating VAPID_PRIVATE_KEY makes every stored endpoint
+// 401/403 until the browser resubscribes. Compare on load and resubscribe
+// against the current key. Absence of applicationServerKey (Safari) is NOT a
+// mismatch — never unsubscribe what we can't compare. The old server row is
+// left for the push service to 410-prune; deleting it before the new subscribe
+// returns 200 turns a rotation into a total outage. Runs on the existing grant
+// — this never calls requestPermission.
+async function resubscribeIfKeyRotated(reg, subscription) {
+  const current = subscription.options && subscription.options.applicationServerKey;
+  if (!current) return subscription;
+
+  let expected;
+  try {
+    expected = await fetchVapidKeyBytes();
+  } catch (err) {
+    // Offline or a server error: defer, don't drop a working subscription.
+    console.error('VAPID key fetch failed during rotation check:', err);
+    return subscription;
+  }
+
+  if (bytesEqual(new Uint8Array(current), expected)) return subscription;
+
+  await subscription.unsubscribe();
+  return reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: expected,
+  });
 }
 
 function arrayBufferToBase64Url(buffer) {

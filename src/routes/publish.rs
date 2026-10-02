@@ -3,7 +3,7 @@ use worker::*;
 use worker::wasm_bindgen::JsValue;
 
 use crate::db;
-use crate::models::{Message, validate_topic};
+use crate::models::{valid_language_tag, Message, validate_topic};
 
 // ntfy 2.28 field caps. Titles and tags are fan-out amplifiers: every
 // subscriber's Web Push carries them, so an unbounded header inflates every
@@ -11,7 +11,7 @@ use crate::models::{Message, validate_topic};
 const TITLE_MAX_BYTES: usize = 1024;
 const TAGS_MAX_BYTES: usize = 512;
 
-pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
+pub async fn handle(mut req: Request, ctx: RouteContext<Context>) -> Result<Response> {
     let topic = ctx.param("topic").unwrap().to_string();
     validate_topic(&topic)?;
 
@@ -27,6 +27,7 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         click_header,
         image_header,
         markdown_header,
+        language_header,
     ) = {
         let headers = req.headers();
         let content_type = headers.get("Content-Type")?.unwrap_or_default();
@@ -54,6 +55,7 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
             .or(headers.get("Markdown")?)
             .map(|v| v == "1" || v == "true" || v == "yes")
             .unwrap_or(false);
+        let language_header = headers.get("X-Language")?.or(headers.get("Language")?);
         (
             is_encrypted,
             max_body,
@@ -64,6 +66,7 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
             click_header,
             image_header,
             markdown_header,
+            language_header,
         )
     };
 
@@ -80,6 +83,13 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         if let Some(t) = tags_header.as_deref() {
             if t.len() > TAGS_MAX_BYTES {
                 return Response::error("tags too long", 400);
+            }
+        }
+        // A publisher who set X-Language meant it: reject a bad tag rather than
+        // silently dropping it (same rule as over-long titles and tags).
+        if let Some(l) = language_header.as_deref() {
+            if !valid_language_tag(l) {
+                return Response::error("language invalid", 400);
             }
         }
     }
@@ -100,11 +110,10 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         return Response::error("Payload Too Large", 413);
     }
 
-    let (title, tags, click, image, markdown) = if is_encrypted {
-        // Don't honour content headers for encrypted messages — title/tags/etc.
-        // live inside the ciphertext envelope. Store a fixed placeholder title
-        // so the server-visible record is uniformly opaque.
-        (Some("[encrypted]".to_string()), None, None, None, false)
+    // For E2EE the language lives inside the ciphertext (the client seals it
+    // next to title/click/image); the server ignores the header and stores None.
+    let (title, tags, click, image, markdown, language) = if is_encrypted {
+        (Some("[encrypted]".to_string()), None, None, None, false, None)
     } else {
         (
             title_header,
@@ -112,6 +121,7 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
             click_header,
             image_header,
             markdown_header,
+            language_header,
         )
     };
 
@@ -128,12 +138,20 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         image,
         markdown,
         encrypted: is_encrypted,
+        language,
         created_at: now as i64,
     };
 
     // Insert into D1
     let d1 = ctx.d1("DB")?;
     db::insert_message(&d1, &msg).await?;
+
+    // Opportunistic receipt retention (§56): delete rows older than 24h for this
+    // topic at the start of the publish. No cron, no Queue — this rides the
+    // publish that already touches the table.
+    if let Err(e) = db::prune_old_push_receipts(&d1, &topic, now as i64 - 24 * 3600).await {
+        console_log!("Receipt retention failed: {:?}", e);
+    }
 
     // Broadcast to WebSocket subscribers via Durable Object
     let namespace = ctx.durable_object("TOPIC_ROOM")?;
@@ -159,10 +177,31 @@ pub async fn handle(mut req: Request, ctx: RouteContext<()>) -> Result<Response>
         }
     }
 
-    // Send Web Push notifications (must await, not spawn_local)
-    if let Err(e) = crate::webpush::send_push_to_topic(&ctx.env, &msg).await {
-        console_log!("Web Push error: {:?}", e);
+    // Web Push fan-out. Count the allowlisted subscriptions first, then hand the
+    // actual delivery to wait_until so a slow push service never stalls the
+    // publish response. The response only carries the count and the receipts URL.
+    let subscriptions = crate::webpush::prepare_subscriptions(&ctx.env, &topic).await?;
+    let attempted = subscriptions.len();
+    if attempted > 0 {
+        let env = ctx.env.clone();
+        let msg_clone = msg.clone();
+        ctx.data.wait_until(async move {
+            if let Err(e) =
+                crate::webpush::send_push_to_topic(&env, &msg_clone, &subscriptions).await
+            {
+                console_log!("Web Push error: {:?}", e);
+            }
+        });
     }
 
-    Response::from_json(&msg)
+    let resp = Response::from_json(&msg)?;
+    resp.headers().set("X-Message-Id", &msg.id)?;
+    resp.headers().set("X-Push-Attempted", &attempted.to_string())?;
+    if attempted > 0 {
+        resp.headers().set(
+            "X-Push-Receipts",
+            &format!("/{}/push/receipts?id={}", topic, msg.id),
+        )?;
+    }
+    Ok(resp)
 }
