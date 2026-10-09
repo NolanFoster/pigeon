@@ -318,13 +318,20 @@ async function audibleDecision(priority) {
 // Collapse chatter so Notification Organizer / cooldown grouping see one row
 // per topic instead of N snowflake heads-ups. Priority 5 keeps a unique tag so a
 // fire-alert is never overwritten by — and never overwrites — routine chatter.
-// (When #36's RFC 8030 `Topic` header lands on the server it still owns the
-// push-service-side collapse; this is the toast-level tag.)
+// (The RFC 8030 `Topic` header the server now sends on the push request — #58 —
+// owns the push-service-side collapse; this is the toast-level tag.)
 function tagFor(n, priority) {
   if (priority === 5) {
     return (n.id && n.topic) ? `pigeon:${n.topic}:${n.id}` : (n.id || undefined);
   }
   return n.topic ? `pigeon:${n.topic}` : (n.id || undefined);
+}
+
+// True when `tag` is the collapsing per-topic tag (`pigeon:<topic>`), as
+// opposed to priority 5's unique `pigeon:<topic>:<id>` tag.
+function isCollapsingPerTopicTag(tag) {
+  if (typeof tag !== 'string' || !tag.startsWith('pigeon:')) return false;
+  return tag.indexOf(':', 'pigeon:'.length) === -1;
 }
 
 // A Copy action that writes the shade body to the clipboard without opening the
@@ -399,10 +406,11 @@ function eventTimestampMs(n) {
 async function showNotificationFor(n) {
   const priority = normalizePriority(n.priority);
   const decision = await audibleDecision(priority);
+  const tag = tagFor(n, priority);
 
   const options = {
     body: n.body,
-    tag: tagFor(n, priority),
+    tag,
     icon: '/icon-192.png',
     badge: '/badge.png',
     image: n.image,
@@ -411,6 +419,15 @@ async function showNotificationFor(n) {
     // so carry the shade copy on the data object for the Copy action.
     data: { click: n.click, topic: n.topic, body: n.body, title: n.title, id: n.id },
   };
+
+  // A fire-alert (priority 5) must stay on screen — Chrome minimises a desktop
+  // toast in seconds without requireInteraction.
+  if (priority === 5) options.requireInteraction = true;
+
+  // A priority ≥ 4 replacement re-alerts, but only for the collapsing per-topic
+  // tag: renotify without a tag throws on some engines, and priority 5's unique
+  // tag makes renotify a no-op anyway.
+  if (priority >= 4 && isCollapsingPerTopicTag(tag)) options.renotify = true;
 
   // Event time on the shade (#56): a late toast shows when the event happened,
   // not when the radio woke up. Language names the voice for screen readers and
@@ -434,6 +451,24 @@ async function showNotificationFor(n) {
   }
 }
 
+// A declarative push (#58) is `{ web_push: 8030, notification, pigeon }`.
+// `notification` is what a declarative UA (Safari) renders without us; `pigeon`
+// is what we render when our worker runs (priority, tag, Copy, audible clock).
+// Render from `pigeon` when present; from `notification` when `pigeon` was the
+// thing the size ladder had to drop.
+function unwrapPush(data) {
+  if (data && data.web_push === 8030 && data.notification && typeof data.notification === 'object') {
+    if (data.pigeon && typeof data.pigeon === 'object') return data.pigeon;
+    const n = data.notification;
+    return {
+      title: n.title,
+      message: typeof n.body === 'string' ? n.body : '',
+      language: n.lang,
+    };
+  }
+  return data;
+}
+
 self.addEventListener('push', (event) => {
   let data = {};
   try {
@@ -443,15 +478,16 @@ self.addEventListener('push', (event) => {
   }
 
   event.waitUntil((async () => {
+    const d = unwrapPush(data);
     // Thin E2EE push (encrypted but no ct): show the generic toast immediately,
     // then try to fetch + decrypt the full envelope and replace it.
-    if (data && data.encrypted && typeof data.ct !== 'string' && data.topic && data.id) {
-      await showNotificationFor(genericEncrypted(data));
-      const real = await tryFetchAndDecrypt(data);
+    if (d && d.encrypted && typeof d.ct !== 'string' && d.topic && d.id) {
+      await showNotificationFor(genericEncrypted(d));
+      const real = await tryFetchAndDecrypt(d);
       if (real) await showNotificationFor(real);
       return;
     }
-    await showNotificationFor(await buildNotification(data));
+    await showNotificationFor(await buildNotification(d));
   })());
 });
 

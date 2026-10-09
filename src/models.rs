@@ -76,6 +76,21 @@ pub fn validate_push_endpoint(endpoint: &str) -> Result<()> {
     Ok(())
 }
 
+/// True when the endpoint host is Apple's Web Push service. Apple's push
+/// service rejects a request carrying an RFC 8030 `Topic` header it does not
+/// understand, so the wire must skip `Topic` for these endpoints (FCM and
+/// Mozilla autopush honour it). Matches the `*.push.apple.com` suffix the
+/// allowlist in `validate_push_endpoint` recognises.
+pub fn is_apple_push_endpoint(endpoint: &str) -> bool {
+    match Url::parse(endpoint) {
+        Ok(url) => url
+            .host_str()
+            .map(|h| h.to_ascii_lowercase().ends_with(".push.apple.com"))
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: String,
@@ -175,5 +190,15 @@ mod tests {
         // Subtags are capped at 8 alphanumeric chars.
         assert!(!valid_language_tag("en-abcdefghi"));
         assert!(valid_language_tag("en-abcdefgh"));
+    }
+
+    #[test]
+    fn apple_endpoint_detection_matches_allowlist_suffix() {
+        assert!(is_apple_push_endpoint("https://web.push.apple.com/QPabcdef"));
+        assert!(is_apple_push_endpoint("https://api.push.apple.com/3/device/x"));
+        assert!(is_apple_push_endpoint("https://some.push.apple.com/abc"));
+        assert!(!is_apple_push_endpoint("https://fcm.googleapis.com/fcm/send/abc"));
+        assert!(!is_apple_push_endpoint("https://updates.push.services.mozilla.com/wpush/v2/abc"));
+        assert!(!is_apple_push_endpoint("not a url"));
     }
 }

@@ -110,6 +110,14 @@ purpose:
 - **Poll replay** is bounded to the newest 500 messages (or 1 MB of JSON), with
   `X-Messages-Truncated: 1` signalling a cut.
 
+> **X-Priority drives the wire.** The publish header now sets the RFC 8030
+> `Urgency` and `TTL` on the push request (priority 1 is `very-low` with a 1h
+> TTL; priority 5 is `high` with a 2min TTL). Priorities 1–4 also collapse at
+> the push service via an RFC 8030 `Topic` header, not just on the shade. A
+> plaintext push is a declarative document (`web_push: 8030`) that Safari can
+> render without the service worker; Chrome's service worker reads the same
+> document. Encrypted topics are unchanged and still need the worker.
+
 ### Delivery receipts
 
 `POST /:topic` returns immediately with `X-Message-Id`, `X-Push-Attempted` (how
