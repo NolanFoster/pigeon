@@ -375,3 +375,76 @@ test('showNotificationFor: invalid lang is omitted, not thrown', async () => {
   await sandbox.showNotificationFor(message({ language: 'not a tag' }));
   assert.equal(calls.shown[0].options.lang, undefined);
 });
+
+// ---------------------------------------------------------------------------
+// #58 declarative push: { web_push: 8030, notification, pigeon }
+// ---------------------------------------------------------------------------
+
+function firePush(listeners, payload) {
+  let pending = Promise.resolve();
+  listeners.push({
+    data: { json: () => payload },
+    waitUntil: (p) => { pending = p; },
+  });
+  return pending;
+}
+
+test('push: declarative {web_push, notification, pigeon} renders one toast with priority-5 requireInteraction', async () => {
+  const { calls, listeners } = loadSW();
+  await firePush(listeners, {
+    web_push: 8030,
+    notification: {
+      title: 'disk2 backup failed',
+      body: 'snapshot took 412s',
+      silent: false,
+      app_badge: '1',
+    },
+    pigeon: {
+      id: 'msg-1',
+      topic: 'alerts',
+      message: 'snapshot took 412s',
+      title: 'disk2 backup failed',
+      priority: 5,
+      created_at: 1_000_000,
+    },
+  });
+  assert.equal(calls.shown.length, 1);
+  const { title, options } = calls.shown[0];
+  assert.equal(title, 'disk2 backup failed');
+  assert.equal(options.requireInteraction, true);
+  // Priority 5 keeps a unique tag, so a re-alert would be a no-op.
+  assert.equal(options.renotify, undefined);
+  assert.equal(options.tag, 'pigeon:alerts:msg-1');
+  assert.equal(options.silent, false);
+});
+
+test('push: declarative payload with no pigeon renders one toast from notification.title', async () => {
+  const { calls, listeners } = loadSW();
+  await firePush(listeners, {
+    web_push: 8030,
+    notification: {
+      title: 'Backup failed',
+      body: 'disk2 needs attention',
+      lang: 'en-GB',
+    },
+  });
+  assert.equal(calls.shown.length, 1);
+  assert.equal(calls.shown[0].title, 'Backup failed');
+  assert.equal(calls.shown[0].options.body, 'disk2 needs attention');
+  assert.equal(calls.shown[0].options.lang, 'en-GB');
+});
+
+test('showNotificationFor: priority 4 re-alerts on the collapsing per-topic tag', async () => {
+  const { sandbox, calls } = loadSW();
+  await sandbox.showNotificationFor(message({ priority: 4 }));
+  assert.equal(calls.shown[0].options.renotify, true);
+  assert.equal(calls.shown[0].options.tag, 'pigeon:alerts');
+  assert.equal(calls.shown[0].options.requireInteraction, undefined);
+});
+
+test('showNotificationFor: priority 5 does not re-alert (unique tag, requireInteraction)', async () => {
+  const { sandbox, calls } = loadSW();
+  await sandbox.showNotificationFor(message({ priority: 5 }));
+  assert.equal(calls.shown[0].options.renotify, undefined);
+  assert.equal(calls.shown[0].options.requireInteraction, true);
+});

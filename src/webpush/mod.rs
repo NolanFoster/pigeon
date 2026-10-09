@@ -6,7 +6,7 @@ use worker::*;
 use worker::wasm_bindgen::JsValue;
 
 use crate::db;
-use crate::models::{validate_push_endpoint, Message, PushSubscriptionRecord};
+use crate::models::{is_apple_push_endpoint, validate_push_endpoint, Message, PushSubscriptionRecord};
 
 enum PushError {
     Gone,
@@ -69,10 +69,13 @@ pub async fn send_push_to_topic(
     let vapid_private_key = env.secret("VAPID_PRIVATE_KEY")?.to_string();
     let vapid_public_key = env.var("VAPID_PUBLIC_KEY")?.to_string();
     let vapid_subject = env.var("VAPID_SUBJECT")?.to_string();
+    // Optional. When set, plaintext pushes carry a declarative `navigate`
+    // (#58); when unset the service worker's navigateFor fills it in.
+    let public_origin = env.var("PUBLIC_ORIGIN").ok().map(|v| v.to_string());
 
     // Thin push: the D1 row and WebSocket carry the full message; the push
     // service gets a size-bounded envelope instead of `serde_json::to_vec(msg)`.
-    let payload = push_payload(msg, None);
+    let payload = push_payload(msg, public_origin.as_deref());
 
     for sub in subscriptions {
         match send_single_push(
@@ -83,6 +86,8 @@ pub async fn send_push_to_topic(
             &vapid_private_key,
             &vapid_public_key,
             &vapid_subject,
+            msg.priority,
+            &msg.topic,
         )
         .await
         {
@@ -105,6 +110,8 @@ pub async fn send_push_to_topic(
                     &vapid_private_key,
                     &vapid_public_key,
                     &vapid_subject,
+                    msg.priority,
+                    &msg.topic,
                 )
                 .await
                 {
@@ -145,17 +152,22 @@ fn error_http_status(err: &PushError) -> Option<i64> {
     }
 }
 
-/// sha256 of the endpoint, hex-encoded. The endpoint is a capability
-/// credential, so the receipt table stores the hash and never the URL.
-fn endpoint_hash(endpoint: &str) -> String {
+/// sha256 of a UTF-8 string, hex-encoded (64 chars).
+fn sha256_hex(s: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(endpoint.as_bytes());
+    hasher.update(s.as_bytes());
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(64);
     for b in digest {
         hex.push_str(&format!("{:02x}", b));
     }
     hex
+}
+
+/// sha256 of the endpoint, hex-encoded. The endpoint is a capability
+/// credential, so the receipt table stores the hash and never the URL.
+fn endpoint_hash(endpoint: &str) -> String {
+    sha256_hex(endpoint)
 }
 
 async fn write_receipt(
@@ -219,16 +231,19 @@ async fn handle_push_error(
 
 /// Build the thin push payload for one message.
 ///
-/// `public_origin` is reserved for #40's Declarative Web Push wrap, which needs
-/// the origin to construct `notification.navigate`. The flat object shipped here
-/// lets the service worker resolve relative links against its own origin, so the
-/// server never needs to know its public hostname.
+/// Plaintext messages are wrapped as a Declarative Web Push document
+/// (`web_push: 8030`, #58) so a declarative UA can render them without our
+/// service worker. `public_origin`, when configured, becomes
+/// `notification.navigate`; otherwise the service worker's `navigateFor` fills
+/// it in. Encrypted messages are not wrapped — the server only sees ciphertext.
 pub fn push_payload(msg: &Message, public_origin: Option<&str>) -> Vec<u8> {
-    let _ = public_origin;
     if msg.encrypted {
+        // Encrypted pushes are NOT wrapped (#58): the server only sees
+        // ciphertext, and putting plaintext in `notification.*` would break the
+        // E2EE promise in the README. Do not "finish" the wrap for E2EE.
         build_e2ee_payload(msg)
     } else {
-        build_plaintext_payload(msg)
+        build_plaintext_payload(msg, public_origin)
     }
 }
 
@@ -244,7 +259,75 @@ fn truncate_utf8(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-fn build_plaintext_payload(msg: &Message) -> Vec<u8> {
+/// RFC 8030 §5.3 Urgency / §5.2 TTL, keyed on the publisher's X-Priority.
+/// `high` is reserved for priorities 4 and 5; priorities 1–2 must not wake the
+/// radio, so `very-low`/`low` with a short TTL lets the push service wait for a
+/// radio that is already awake instead of churning it. Missing or unparseable
+/// priority is already normalised to 3 upstream (publish.rs clamps to 1–5 and
+/// sw.js normalises to 3); 0 / 6 / anything else maps to the priority-3 row.
+fn delivery_headers(priority: u8) -> (&'static str, u32) {
+    match priority {
+        1 => ("very-low", 3600),
+        2 => ("low", 3600),
+        3 => ("normal", 14400),
+        4 => ("high", 600),
+        5 => ("high", 120),
+        _ => ("normal", 14400),
+    }
+}
+
+/// RFC 8030 `Topic` header value: the first 32 hex chars of sha256(topic). The
+/// raw topic is a capability credential, so it must never appear on a header
+/// the push service logs. Priorities 1–4 collapse per topic at the push
+/// service; priority 5 omits the header so a fire-alert can never be replaced
+/// by chatter. Apple's push service rejects an unknown `Topic`, so it is
+/// skipped for `*.push.apple.com` (FCM and Mozilla autopush honour it).
+fn topic_header(topic: &str, priority: u8, endpoint: &str) -> Option<String> {
+    if !(1..=4).contains(&priority) {
+        return None;
+    }
+    if is_apple_push_endpoint(endpoint) {
+        return None;
+    }
+    Some(sha256_hex(topic).chars().take(32).collect())
+}
+
+/// The title a declarative notification shows. A declarative message with no
+/// title is dropped by the UA, which violates userVisibleOnly, so this never
+/// returns an empty string: the publisher's title, else the first line of the
+/// body, else a generic fallback. Never the topic name or "Pigeon".
+fn notification_title(msg: &Message, truncated_body: &str) -> String {
+    if let Some(t) = msg.title.as_deref() {
+        let t = t.trim();
+        if !t.is_empty() {
+            return truncate_utf8(t, TITLE_TRUNCATE_BYTES).to_string();
+        }
+    }
+    let first_line = truncated_body.split('\n').next().unwrap_or("").trim();
+    if !first_line.is_empty() {
+        return truncate_utf8(first_line, TITLE_TRUNCATE_BYTES).to_string();
+    }
+    "New message".to_string()
+}
+
+/// Absolute navigate URL for a declarative notification, or None. Only built
+/// when `public_origin` is a configured absolute http(s) origin: a relative
+/// `navigate` is not in the declarative grammar and an Apple UA ignores the
+/// whole message. Topics are restricted to URL-safe characters, so no escaping
+/// is needed.
+fn navigate_url(public_origin: &str, topic: &str) -> Option<String> {
+    let origin = public_origin.trim().trim_end_matches('/');
+    if origin.is_empty() {
+        return None;
+    }
+    let url = worker::Url::parse(origin).ok()?;
+    if (url.scheme() != "https" && url.scheme() != "http") || url.host_str().is_none() {
+        return None;
+    }
+    Some(format!("{}/?topic={}", origin, topic))
+}
+
+fn build_plaintext_payload(msg: &Message, public_origin: Option<&str>) -> Vec<u8> {
     // Rule 1: never ship the hero image — the UA fetches it from https: and it
     // is the first thing to blow the 4 KB budget. D1/WS still carry X-Image.
     // Rule 2: body truncated to 240 bytes (full body stays in D1/WS/poll).
@@ -253,12 +336,14 @@ fn build_plaintext_payload(msg: &Message) -> Vec<u8> {
         message.push('…');
     }
     // Rule 3: title truncated to 120 bytes (visible target is ~50).
-    let title = msg
+    let title_field = msg
         .title
         .as_deref()
         .map(|t| truncate_utf8(t, TITLE_TRUNCATE_BYTES).to_string());
 
-    let mut obj = serde_json::json!({
+    // `pigeon` carries the same fields the flat object carried, so the service
+    // worker keeps its priority/tag/Copy/audible-clock behaviour.
+    let mut pigeon = serde_json::json!({
         "id": msg.id,
         "topic": msg.topic,
         "message": message,
@@ -267,8 +352,8 @@ fn build_plaintext_payload(msg: &Message) -> Vec<u8> {
         "created_at": msg.created_at,
     });
     {
-        let map = obj.as_object_mut().expect("payload is an object");
-        if let Some(t) = &title {
+        let map = pigeon.as_object_mut().expect("pigeon is an object");
+        if let Some(t) = &title_field {
             map.insert("title".into(), serde_json::json!(t));
         }
         if let Some(tags) = &msg.tags {
@@ -282,34 +367,82 @@ fn build_plaintext_payload(msg: &Message) -> Vec<u8> {
         }
     }
 
+    // `notification` is what a declarative UA renders without running our JS.
+    // `dir` and `icon` are deliberately omitted; `silent` mirrors the audible
+    // budget's intent (true for 1–3, false for 4–5), not its 60s clock.
+    let mut notification = serde_json::json!({
+        "title": notification_title(msg, &message),
+        "silent": msg.priority <= 3,
+        "app_badge": "1",
+    });
+    {
+        let map = notification.as_object_mut().expect("notification is an object");
+        if !message.is_empty() {
+            map.insert("body".into(), serde_json::json!(message));
+        }
+        if let Some(lang) = &msg.language {
+            map.insert("lang".into(), serde_json::json!(lang));
+        }
+        if let Some(origin) = public_origin {
+            if let Some(nav) = navigate_url(origin, &msg.topic) {
+                map.insert("navigate".into(), serde_json::json!(nav));
+            }
+        }
+    }
+
+    let mut obj = serde_json::json!({
+        "web_push": 8030,
+        "notification": notification,
+        "pigeon": pigeon,
+    });
+
+    // Size ladder (#47), applied to the declarative object: drop pigeon.tags,
+    // then pigeon.click, then notification.navigate. `web_push` and
+    // `notification.title` are never dropped.
     let mut bytes = serde_json::to_vec(&obj).unwrap_or_default();
     if bytes.len() <= PUSH_PAYLOAD_MAX_BYTES {
         return bytes;
     }
-    // Rule 4: drop tags — filter UI, not shade copy.
-    obj.as_object_mut().map(|m| m.remove("tags"));
+    if let Some(p) = obj.get_mut("pigeon").and_then(|v| v.as_object_mut()) {
+        p.remove("tags");
+    }
     bytes = serde_json::to_vec(&obj).unwrap_or_default();
     if bytes.len() <= PUSH_PAYLOAD_MAX_BYTES {
         return bytes;
     }
-    // Rule 5: drop click — the service worker falls back to /?topic=<topic>.
-    obj.as_object_mut().map(|m| m.remove("click"));
+    if let Some(p) = obj.get_mut("pigeon").and_then(|v| v.as_object_mut()) {
+        p.remove("click");
+    }
     bytes = serde_json::to_vec(&obj).unwrap_or_default();
     if bytes.len() <= PUSH_PAYLOAD_MAX_BYTES {
         return bytes;
     }
-    // Pathological (title+id+topic alone exceed the cap): last resort, still a
-    // valid toast.
+    if let Some(n) = obj.get_mut("notification").and_then(|v| v.as_object_mut()) {
+        n.remove("navigate");
+    }
+    bytes = serde_json::to_vec(&obj).unwrap_or_default();
+    if bytes.len() <= PUSH_PAYLOAD_MAX_BYTES {
+        return bytes;
+    }
+    // Pathological (title+id+topic alone exceed the cap): a wrap that does not
+    // fit is a ladder bug, not a reason to send the flat object.
     console_log!("push_payload: last-resort generic payload for topic {}", msg.topic);
     generic_plaintext_payload(msg)
 }
 
 fn generic_plaintext_payload(msg: &Message) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
-        "id": msg.id,
-        "topic": msg.topic,
-        "message": "New message",
-        "priority": msg.priority,
+        "web_push": 8030,
+        "notification": {
+            "title": "New message",
+            "silent": msg.priority <= 3,
+            "app_badge": "1",
+        },
+        "pigeon": {
+            "id": msg.id,
+            "topic": msg.topic,
+            "priority": msg.priority,
+        },
     }))
     .unwrap_or_default()
 }
@@ -354,10 +487,17 @@ fn generic_retry_payload(msg: &Message) -> Vec<u8> {
         .unwrap_or_default()
     } else {
         serde_json::to_vec(&serde_json::json!({
-            "id": msg.id,
-            "topic": msg.topic,
-            "priority": msg.priority,
-            "title": "New message",
+            "web_push": 8030,
+            "notification": {
+                "title": "New message",
+                "silent": msg.priority <= 3,
+                "app_badge": "1",
+            },
+            "pigeon": {
+                "id": msg.id,
+                "topic": msg.topic,
+                "priority": msg.priority,
+            },
         }))
         .unwrap_or_default()
     }
@@ -371,6 +511,8 @@ async fn send_single_push(
     vapid_private_key: &str,
     vapid_public_key: &str,
     vapid_subject: &str,
+    priority: u8,
+    topic: &str,
 ) -> std::result::Result<u16, PushError> {
     let encrypted = encrypt::encrypt_payload(payload, p256dh, auth).map_err(PushError::Worker)?;
     let auth_header =
@@ -381,8 +523,14 @@ async fn send_single_push(
     headers.set("Authorization", &auth_header).map_err(PushError::Worker)?;
     headers.set("Content-Encoding", "aes128gcm").map_err(PushError::Worker)?;
     headers.set("Content-Type", "application/octet-stream").map_err(PushError::Worker)?;
-    headers.set("TTL", "86400").map_err(PushError::Worker)?;
-    headers.set("Urgency", "high").map_err(PushError::Worker)?;
+    let (urgency, ttl) = delivery_headers(priority);
+    headers.set("TTL", &ttl.to_string()).map_err(PushError::Worker)?;
+    headers.set("Urgency", urgency).map_err(PushError::Worker)?;
+    // RFC 8030 Topic collapses still-queued messages at the push service; see
+    // topic_header for the priority / Apple-endpoint rules.
+    if let Some(topic_value) = topic_header(topic, priority, endpoint) {
+        headers.set("Topic", &topic_value).map_err(PushError::Worker)?;
+    }
 
     let body = js_sys::Uint8Array::from(encrypted.as_slice());
     let mut init = RequestInit::new();
@@ -463,12 +611,16 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&payload).unwrap();
 
         assert!(payload.len() <= PUSH_PAYLOAD_MAX_BYTES);
+        assert_eq!(v["web_push"], serde_json::json!(8030));
         assert!(v.get("image").is_none(), "hero images must not ship in push");
-        let body = v["message"].as_str().unwrap();
+        assert!(v["pigeon"].get("image").is_none());
+        let body = v["pigeon"]["message"].as_str().unwrap();
         assert!(body.ends_with('…'), "truncated body must end with ellipsis");
         assert!(body.len() <= MESSAGE_TRUNCATE_BYTES + 3);
-        assert_eq!(v["title"].as_str().unwrap(), "Backup failed");
-        assert_eq!(v["markdown"], serde_json::json!(false));
+        assert_eq!(v["pigeon"]["title"].as_str().unwrap(), "Backup failed");
+        assert_eq!(v["pigeon"]["markdown"], serde_json::json!(false));
+        assert_eq!(v["notification"]["title"].as_str().unwrap(), "Backup failed");
+        assert_eq!(v["notification"]["body"].as_str().unwrap(), body);
     }
 
     #[test]
@@ -505,7 +657,8 @@ mod tests {
         };
         let payload = push_payload(&m, None);
         let v: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-        assert_eq!(v["language"], serde_json::json!("en-GB"));
+        assert_eq!(v["pigeon"]["language"], serde_json::json!("en-GB"));
+        assert_eq!(v["notification"]["lang"], serde_json::json!("en-GB"));
     }
 
     #[test]
@@ -519,6 +672,109 @@ mod tests {
         let payload = push_payload(&m, None);
         let v: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert!(v.get("language").is_none(), "E2EE language lives in the ciphertext");
+    }
+
+    #[test]
+    fn delivery_headers_map_priority_to_urgency_and_ttl() {
+        assert_eq!(delivery_headers(1), ("very-low", 3600));
+        assert_eq!(delivery_headers(2), ("low", 3600));
+        assert_eq!(delivery_headers(3), ("normal", 14400));
+        assert_eq!(delivery_headers(4), ("high", 600));
+        assert_eq!(delivery_headers(5), ("high", 120));
+        // 0 / 6 / anything unparseable maps to the priority-3 row.
+        assert_eq!(delivery_headers(0), ("normal", 14400));
+        assert_eq!(delivery_headers(6), ("normal", 14400));
+    }
+
+    #[test]
+    fn topic_header_collapses_1_to_4_and_skips_apple_and_priority_5() {
+        let fcm = "https://fcm.googleapis.com/fcm/send/abc";
+        let apple = "https://web.push.apple.com/QPabcdef";
+
+        let t = topic_header("mytopic", 3, fcm).unwrap();
+        assert_eq!(t.len(), 32);
+        assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(t, "mytopic", "the raw topic must never be a header value");
+
+        assert_eq!(topic_header("mytopic", 1, fcm).as_deref().map(str::len), Some(32));
+        assert_eq!(topic_header("mytopic", 4, fcm).as_deref().map(str::len), Some(32));
+        assert_eq!(topic_header("mytopic", 5, fcm), None);
+        assert_eq!(topic_header("mytopic", 3, apple), None);
+        assert_eq!(topic_header("mytopic", 5, apple), None);
+        assert_eq!(topic_header("mytopic", 1, apple), None);
+    }
+
+    #[test]
+    fn plaintext_push_is_a_declarative_wrap() {
+        let m = Message {
+            title: Some("disk2 backup failed".to_string()),
+            language: Some("en-GB".to_string()),
+            ..base("snapshot took 412s")
+        };
+        let payload = push_payload(&m, Some("https://pigeon.example"));
+        let v: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+
+        assert_eq!(v["web_push"], serde_json::json!(8030));
+        assert_eq!(v["notification"]["title"], serde_json::json!("disk2 backup failed"));
+        assert_eq!(v["notification"]["body"], serde_json::json!("snapshot took 412s"));
+        assert_eq!(v["notification"]["lang"], serde_json::json!("en-GB"));
+        assert_eq!(v["notification"]["navigate"], serde_json::json!("https://pigeon.example/?topic=homelab"));
+        assert_eq!(v["notification"]["silent"], serde_json::json!(true)); // priority 3
+        assert_eq!(v["notification"]["app_badge"], serde_json::json!("1"));
+        assert!(v["notification"].get("icon").is_none(), "icon needs a public_origin and stays omitted");
+        assert_eq!(v["pigeon"]["topic"], serde_json::json!("homelab"));
+        assert!(payload.len() <= PUSH_PAYLOAD_MAX_BYTES);
+    }
+
+    #[test]
+    fn plaintext_push_omits_navigate_without_public_origin() {
+        let m = base("hi");
+        let payload = push_payload(&m, None);
+        let v: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert!(v["notification"].get("navigate").is_none());
+        assert_eq!(v["notification"]["title"], serde_json::json!("hi"));
+    }
+
+    #[test]
+    fn plaintext_push_title_falls_back_to_first_line_of_body() {
+        let m = base("first line\nsecond line");
+        let payload = push_payload(&m, None);
+        let v: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(v["notification"]["title"], serde_json::json!("first line"));
+        assert_eq!(v["notification"]["body"], serde_json::json!("first line\nsecond line"));
+        assert!(v["pigeon"].get("title").is_none(), "no publisher title means no pigeon.title");
+    }
+
+    #[test]
+    fn plaintext_push_drops_tags_then_click_to_fit() {
+        let m = Message {
+            title: Some("disk".to_string()),
+            message: "body".to_string(),
+            tags: Some("x".repeat(4000)),
+            click: Some(format!("https://example.com/{}", "y".repeat(4000))),
+            ..base("")
+        };
+        let payload = push_payload(&m, Some("https://pigeon.example"));
+        let v: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert!(payload.len() <= PUSH_PAYLOAD_MAX_BYTES);
+        assert_eq!(v["web_push"], serde_json::json!(8030));
+        assert!(v["pigeon"].get("tags").is_none(), "tags drop first");
+        assert!(v["pigeon"].get("click").is_none(), "click drops second");
+        assert_eq!(v["notification"]["title"], serde_json::json!("disk"));
+    }
+
+    #[test]
+    fn encrypted_push_is_not_wrapped() {
+        let m = Message {
+            encrypted: true,
+            message: "short".to_string(),
+            ..base("")
+        };
+        let payload = push_payload(&m, Some("https://pigeon.example"));
+        let v: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert!(v.get("web_push").is_none(), "E2EE must not be wrapped");
+        assert!(v.get("notification").is_none(), "E2EE must not carry plaintext notification");
+        assert_eq!(v["encrypted"], serde_json::json!(true));
     }
 
     #[test]
