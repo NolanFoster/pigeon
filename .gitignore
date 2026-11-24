@@ -7,3 +7,4 @@ node_modules/
 *.pem
 playwright-report/
 test-results/
+.cargo/
