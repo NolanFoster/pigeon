@@ -133,3 +133,21 @@ pub async fn receipts(req: Request, ctx: RouteContext<Context>) -> Result<Respon
     let receipts = db::get_push_receipts(&d1, &topic, since, id.as_deref()).await?;
     Response::from_json(&receipts)
 }
+
+/// GET /push/budget — the origin's Web Push day count (#61). No topic and no
+/// token: the count is not a secret (it is the number Chrome is already
+/// scoring per origin), and this is a counter, not a log — the response never
+/// includes a topic name, an endpoint, an endpoint hash, or a message body.
+pub async fn budget(_req: Request, ctx: RouteContext<Context>) -> Result<Response> {
+    let d1 = ctx.env.d1("DB")?;
+    let now = (Date::now().as_millis() / 1000) as i64;
+    let s = crate::budget::read_budget(&d1, now).await?;
+    Response::from_json(&serde_json::json!({
+        "day": s.day,
+        "attempted": s.attempted,
+        "skipped": s.skipped,
+        "throttled": s.throttled,
+        "paused_until": s.paused_until,
+        "warn": s.warn,
+    }))
+}

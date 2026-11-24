@@ -60,6 +60,7 @@ pub async fn send_push_to_topic(
     env: &Env,
     msg: &Message,
     subscriptions: &[PushSubscriptionRecord],
+    day: &str,
 ) -> Result<()> {
     let db = env.d1("DB")?;
     if subscriptions.is_empty() {
@@ -77,8 +78,12 @@ pub async fn send_push_to_topic(
     // service gets a size-bounded envelope instead of `serde_json::to_vec(msg)`.
     let payload = push_payload(msg, public_origin.as_deref());
 
-    for sub in subscriptions {
-        match send_single_push(
+    let total = subscriptions.len();
+    for (i, sub) in subscriptions.iter().enumerate() {
+        // One attempt per endpoint. A 429 arms the origin pause and stops the
+        // rest of this fan-out (#61); every other outcome only writes its
+        // receipt, exactly as before.
+        let throttled = match send_single_push(
             &sub.endpoint,
             &sub.p256dh,
             &sub.auth,
@@ -91,7 +96,10 @@ pub async fn send_push_to_topic(
         )
         .await
         {
-            Ok(status) => write_receipt(&db, msg, sub, "accepted", Some(status as i64)).await,
+            Ok(status) => {
+                write_receipt(&db, msg, sub, "accepted", Some(status as i64)).await;
+                false
+            }
             Err(PushError::PayloadTooLarge) => {
                 // One retry with a tiny payload that cannot exceed the budget.
                 // 410 is the only status that prunes; a 413/400 size rejection
@@ -116,12 +124,45 @@ pub async fn send_push_to_topic(
                 .await
                 {
                     Ok(status) => {
-                        write_receipt(&db, msg, sub, "accepted", Some(status as i64)).await
+                        write_receipt(&db, msg, sub, "accepted", Some(status as i64)).await;
+                        false
                     }
-                    Err(e) => handle_push_error(&db, msg, sub, e).await,
+                    Err(e) => {
+                        let is_429 = matches!(&e, PushError::HttpStatus(429));
+                        handle_push_error(&db, msg, sub, e).await;
+                        is_429
+                    }
                 }
             }
-            Err(e) => handle_push_error(&db, msg, sub, e).await,
+            Err(e) => {
+                let is_429 = matches!(&e, PushError::HttpStatus(429));
+                handle_push_error(&db, msg, sub, e).await;
+                is_429
+            }
+        };
+
+        if throttled {
+            // The push service just told the origin to stop (#61): the
+            // throttled receipt is already written above. Do not post the
+            // remaining endpoints of this fan-out, and arm a short origin
+            // pause. Per-endpoint escalation is #42's; this pause is only
+            // "stop for a minute".
+            let now = (Date::now().as_millis() / 1000) as i64;
+            let remaining = (total - i - 1) as i64;
+            if remaining > 0 {
+                if let Err(e) = db::reconcile_push_budget_skip(&db, day, remaining).await {
+                    console_log!("Push budget reconcile failed: {:?}", e);
+                }
+            }
+            if let Err(e) = db::add_push_budget_throttled(&db, day, 1).await {
+                console_log!("Push budget throttled failed: {:?}", e);
+            }
+            if let Err(e) =
+                db::raise_push_budget_pause(&db, day, now + crate::budget::PAUSE_SECS).await
+            {
+                console_log!("Push budget pause failed: {:?}", e);
+            }
+            break;
         }
     }
 

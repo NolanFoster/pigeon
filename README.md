@@ -93,6 +93,7 @@ message, one language.
 | `DELETE` | `/push/subscribe` | Unregister a push endpoint from **every** topic |
 | `GET` | `/vapid-key` | Get VAPID public key for push setup |
 | `GET` | `/:topic/push/receipts?since=<ts>&id=<msg>` | Delivery receipts since a Unix timestamp (optionally one message); 24-hour window, newest 500 |
+| `GET` | `/push/budget` | Origin Web Push day count (`attempted`/`skipped`/`throttled`/`paused_until`/`warn`); no topic, no log |
 
 Both unsubscribe endpoints take `{"endpoint": "https://…"}` as the body.
 
@@ -140,6 +141,39 @@ last 24 hours, and rows older than 24 hours are deleted at the start of the
 next publish to that topic (capped at 200 per publish). Like `GET /:topic/json`,
 knowing the topic is the credential; the endpoint URL and its hash are never
 returned, so don't "fix" the lack of a token by adding one.
+
+
+
+### Origin budget
+
+Chrome scores a Web Push origin once a day on messages sent per time-on-site; a
+disruptive day gets 429s that escalate (1 → 7 → 14 days). Pigeon is one Worker
+— one origin, every topic — so the budget is origin-wide, never per topic. The
+counter is fan-out only: D1 inserts and WebSocket broadcasts are not counted
+(Chrome can't see them).
+
+`POST /:topic` always returns the day's count, so a cron script can stop itself
+before the classifier does:
+
+```bash
+curl -D - -d "Backup failed" https://your-worker.dev/alerts
+# X-Push-Budget-Day: 2026-10-11
+# X-Push-Attempted-Today: 841
+```
+
+`GET /push/budget` returns the same count without publishing:
+`{"day", "attempted", "skipped", "throttled", "paused_until", "warn"}`. `warn`
+is `daily` (1,000 attempts in the UTC day), `burst` (60 attempts in any 60
+seconds), or null. A warn never changes the status code — the message is always
+stored; the push is what gets withheld.
+
+`X-Push: 0` (alias `Push`; `off`/`false` also accepted) stores and broadcasts
+the message but does not fan out — the off switch for a shared origin whose
+count is already high. Priority 5 does not override it. One HTTP 429 from a
+push service stops the rest of that fan-out and pauses the origin for 60
+seconds (`X-Push-Paused: 1`); a priority-5 publish still tries once during the
+pause. There is no `DELETE /push/budget`: the counter is Chrome's score, and
+deleting our row would not reset it.
 
 ### Turning push notifications off
 
