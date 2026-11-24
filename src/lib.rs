@@ -1,5 +1,6 @@
 use worker::*;
 
+mod budget;
 mod db;
 mod durable;
 mod models;
@@ -160,6 +161,7 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
         .get_async("/:topic/json", routes::poll::handle)
         .get_async("/:topic/messages/:id", routes::poll::get_one)
         .get_async("/:topic/push/receipts", routes::push::receipts)
+        .get_async("/push/budget", routes::push::budget)
         .get_async("/:topic/sse", routes::subscribe::handle)
         .delete_async("/:topic/messages", routes::poll::delete)
         .delete_async("/:topic/messages/:id", routes::poll::delete_one)

@@ -273,6 +273,108 @@ pub async fn prune_old_push_receipts(db: &D1Database, topic: &str, cutoff: i64) 
     Ok(())
 }
 
+/// One row of the origin push budget (#61). `burst` is a JSON object
+/// `{"head": <unix second>, "buckets": [60 ints]}` (see `budget::Burst`).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PushBudgetRow {
+    pub attempted: i64,
+    pub skipped: i64,
+    pub throttled: i64,
+    pub paused_until: Option<i64>,
+    pub burst: Option<String>,
+}
+
+pub async fn get_push_budget(db: &D1Database, day: &str) -> Result<Option<PushBudgetRow>> {
+    let stmt = db.prepare(
+        "SELECT attempted, skipped, throttled, paused_until, burst
+         FROM push_budget WHERE day = ?1 LIMIT 1",
+    );
+    let result = stmt
+        .bind(&[JsValue::from_str(day)])?
+        .first::<PushBudgetRow>(None)
+        .await?;
+    Ok(result)
+}
+
+/// Create today's row if it does not exist. `day` is a "YYYY-MM-DD" UTC date.
+pub async fn ensure_push_budget(db: &D1Database, day: &str) -> Result<()> {
+    let stmt = db.prepare(
+        "INSERT OR IGNORE INTO push_budget (day, attempted, skipped, throttled, paused_until, burst)
+         VALUES (?1, 0, 0, 0, NULL, NULL)",
+    );
+    stmt.bind(&[JsValue::from_str(day)])?.run().await?;
+    Ok(())
+}
+
+/// Overwrite the optimistic attempt count and burst ring for the day.
+pub async fn set_push_budget_attempted_and_burst(
+    db: &D1Database,
+    day: &str,
+    attempted: i64,
+    burst: &str,
+) -> Result<()> {
+    let stmt = db.prepare("UPDATE push_budget SET attempted = ?1, burst = ?2 WHERE day = ?3");
+    stmt.bind(&[
+        JsValue::from(attempted as f64),
+        JsValue::from_str(burst),
+        JsValue::from_str(day),
+    ])?
+    .run()
+    .await?;
+    Ok(())
+}
+
+pub async fn add_push_budget_skipped(db: &D1Database, day: &str, n: i64) -> Result<()> {
+    let stmt = db.prepare("UPDATE push_budget SET skipped = skipped + ?1 WHERE day = ?2");
+    stmt.bind(&[JsValue::from(n as f64), JsValue::from_str(day)])?
+        .run()
+        .await?;
+    Ok(())
+}
+
+pub async fn add_push_budget_throttled(db: &D1Database, day: &str, n: i64) -> Result<()> {
+    let stmt = db.prepare("UPDATE push_budget SET throttled = throttled + ?1 WHERE day = ?2");
+    stmt.bind(&[JsValue::from(n as f64), JsValue::from_str(day)])?
+        .run()
+        .await?;
+    Ok(())
+}
+
+/// Reconcile the optimistic fan-out add: these endpoints were not posted, so
+/// they move from `attempted` to `skipped`. `attempted` is floored at 0 —
+/// over-counting is the safe direction, never let a reconcile underflow it.
+pub async fn reconcile_push_budget_skip(db: &D1Database, day: &str, n: i64) -> Result<()> {
+    let stmt = db.prepare(
+        "UPDATE push_budget SET attempted = MAX(0, attempted - ?1), skipped = skipped + ?1 WHERE day = ?2",
+    );
+    stmt.bind(&[JsValue::from(n as f64), JsValue::from_str(day)])?
+        .run()
+        .await?;
+    Ok(())
+}
+
+/// Raise `paused_until` to `paused_until` only if it is unset or currently
+/// earlier (a second 429 must not shorten an existing pause).
+pub async fn raise_push_budget_pause(db: &D1Database, day: &str, paused_until: i64) -> Result<()> {
+    let stmt = db.prepare(
+        "UPDATE push_budget SET paused_until = ?1
+         WHERE day = ?2 AND (paused_until IS NULL OR paused_until < ?1)",
+    );
+    stmt.bind(&[JsValue::from(paused_until as f64), JsValue::from_str(day)])?
+        .run()
+        .await?;
+    Ok(())
+}
+
+/// Delete budget rows older than the retention window. `cutoff_day` is a
+/// "YYYY-MM-DD" string; lexicographic order is chronological order, so a plain
+/// `<` comparison is correct.
+pub async fn prune_old_push_budget(db: &D1Database, cutoff_day: &str) -> Result<()> {
+    let stmt = db.prepare("DELETE FROM push_budget WHERE day < ?1");
+    stmt.bind(&[JsValue::from_str(cutoff_day)])?.run().await?;
+    Ok(())
+}
+
 /// Internal row type for D1 deserialization
 #[derive(serde::Deserialize)]
 struct MessageRow {
