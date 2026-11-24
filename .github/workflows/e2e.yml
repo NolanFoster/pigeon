@@ -8,7 +8,10 @@ on:
 
 jobs:
   playwright:
-    runs-on: ubuntu-latest
+    # Pinned to ubuntu-24.04: `ubuntu-latest` now resolves to Ubuntu 26.04,
+    # which the pinned Playwright (^1.59.1) cannot install Chromium for.
+    # Revisit when Playwright is upgraded to a release with 26.04 support.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
