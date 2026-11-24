@@ -162,6 +162,51 @@ pub struct PushUnsubscribeRequest {
     pub endpoint: String,
 }
 
+
+/// A message held in Durable Object storage until its alarm fires (#60).
+/// The scheduled row lives in DO storage, not D1: D1 is what `GET /:topic/json`
+/// and the WebSocket replay read, and a row there is a message that has already
+/// happened.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledMessage {
+    pub id: String,
+    pub topic: String,
+    /// Unix milliseconds — the only clock the alarm compares against.
+    pub deliver_at: i64,
+    /// IANA name, only when the publisher used a phrase. Omitted for RFC 3339.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub message: String,
+    pub priority: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub click: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    pub markdown: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub encrypted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+}
+
+/// Public view of one pending scheduled row (`GET /:topic/scheduled`). The
+/// body is deliberately absent — it can be an E2EE envelope or a 16 KB secret.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledListItem {
+    pub id: String,
+    /// Unix seconds.
+    pub deliver_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub priority: u8,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -47,6 +47,8 @@ curl -H "X-Markdown: 1" \
 | `X-Click` | URL to open on notification click | — | — |
 | `X-Markdown` | Set to `1` to enable markdown rendering | 0 | — |
 | `X-Language` | BCP 47 language tag for the message (`en-GB`) | — | one tag, ≤35 chars |
+| `X-At` | Schedule delivery at a wall-clock time — RFC 3339 with an offset, or `tomorrow, 10am` (with `X-Timezone`) | — | ≤7 days out |
+| `X-Timezone` | IANA timezone for a phrase `X-At` (`Asia/Tokyo`) | — | required for phrases |
 
 > **Lock Screen copy.** The Lock Screen may rewrite your notification (Apple
 > Intelligence / Chrome on-device ML). Put the fact in `X-Title` (≤50
@@ -93,6 +95,8 @@ message, one language.
 | `DELETE` | `/push/subscribe` | Unregister a push endpoint from **every** topic |
 | `GET` | `/vapid-key` | Get VAPID public key for push setup |
 | `GET` | `/:topic/push/receipts?since=<ts>&id=<msg>` | Delivery receipts since a Unix timestamp (optionally one message); 24-hour window, newest 500 |
+| `GET` | `/:topic/scheduled` | List pending scheduled messages for a topic |
+| `DELETE` | `/:topic/scheduled/:id` | Cancel a scheduled message before it fires |
 
 Both unsubscribe endpoints take `{"endpoint": "https://…"}` as the body.
 
@@ -140,6 +144,38 @@ last 24 hours, and rows older than 24 hours are deleted at the start of the
 next publish to that topic (capped at 200 per publish). Like `GET /:topic/json`,
 knowing the topic is the credential; the endpoint URL and its hash are never
 returned, so don't "fix" the lack of a token by adding one.
+
+### Scheduled delivery
+
+`X-At` schedules a publish for a wall-clock time. Two forms, and no others:
+
+- **RFC 3339 with an offset** — `X-At: 2026-12-10T11:00:00-05:00`. The offset
+  inside the timestamp *is* the timezone; do not also set `X-Timezone`.
+- **A phrase** — `X-At: tomorrow, 10am` with `X-Timezone: Asia/Tokyo`.
+  "Today"/"tomorrow" are evaluated in that timezone, not in UTC, so the DST
+  offset that applies on that date is the one that applies. A bare timestamp
+  with no offset and no timezone is a `400` — Pigeon never guesses UTC.
+
+```bash
+curl -H "X-At: 2026-12-10T11:00:00-05:00" -d "Maintenance starts" https://your-worker.dev/alerts
+# HTTP/1.1 202 Accepted
+# X-Scheduled-Id: <uuid>
+# X-Deliver-At: <unix seconds>
+
+curl -H "X-At: tomorrow, 10am" -H "X-Timezone: Asia/Tokyo" -d "Standup" https://your-worker.dev/team
+```
+
+The message is **not** stored in D1, not on the WebSocket, and not pushed until
+the alarm fires — polling clients never see a reminder that has not happened.
+It is capped at 7 days out and at 50 pending messages per topic. Delivery can
+be up to a minute late (Cloudflare alarms are at-least-once and can land late
+during failover); on fire, the message flows through the same insert / broadcast
+/ push path as a normal publish, with `created_at` set to the fire time.
+
+`DELETE /:topic/scheduled/:id` cancels a pending message (`204` if it existed,
+`404` if it already fired); `GET /:topic/scheduled` lists the pending ids with
+their `deliver_at`, `timezone` (when set), title, and priority — never the body,
+which can be an E2EE envelope or a 16 KB secret.
 
 ### Turning push notifications off
 

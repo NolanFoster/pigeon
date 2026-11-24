@@ -4,6 +4,7 @@ mod db;
 mod durable;
 mod models;
 mod routes;
+mod schedule;
 mod webpush;
 
 // Embed static files directly in the binary
@@ -160,9 +161,11 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
         .get_async("/:topic/json", routes::poll::handle)
         .get_async("/:topic/messages/:id", routes::poll::get_one)
         .get_async("/:topic/push/receipts", routes::push::receipts)
+        .get_async("/:topic/scheduled", routes::schedule::list)
         .get_async("/:topic/sse", routes::subscribe::handle)
         .delete_async("/:topic/messages", routes::poll::delete)
         .delete_async("/:topic/messages/:id", routes::poll::delete_one)
+        .delete_async("/:topic/scheduled/:id", routes::schedule::cancel)
         .delete_async("/push/subscribe", routes::push::unsubscribe_all)
         .post_async("/:topic/push/subscribe", routes::push::subscribe)
         .delete_async("/:topic/push/subscribe", routes::push::unsubscribe)
