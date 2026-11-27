@@ -135,7 +135,8 @@ curl "https://your-worker.dev/alerts/push/receipts?since=$(date +%s)&id=<uuid>"
 ```
 
 Each receipt is one row per attempted endpoint: `accepted`, `gone`,
-`throttled`, `too-large`, or `rejected` (plus the push service's HTTP status).
+`throttled`, `too-large`, `rejected`, or `timeout` (plus the push service's
+HTTP status when it answered).
 Receipts are an operational signal, not an archive — `since` must be within the
 last 24 hours, and rows older than 24 hours are deleted at the start of the
 next publish to that topic (capped at 200 per publish). Like `GET /:topic/json`,
@@ -143,6 +144,28 @@ knowing the topic is the credential; the endpoint URL and its hash are never
 returned, so don't "fix" the lack of a token by adding one.
 
 
+
+### Fan-out deadlines and per-network slots
+
+A slow or unresponsive push service must not hold up the rest of the topic. Each
+Web Push post is allowed **5 seconds**; the whole fan-out is allowed **20
+seconds** (the `waitUntil` window is 30). A subscriber that did not answer is a
+`timeout` receipt, *not* a deleted subscription — a phone in a tunnel is still
+the phone. The message stays in the topic: poll `GET /:topic/json` or wait for
+the next publish.
+
+The topic-wide ceiling of **1000** subscriptions is the ceiling, not the
+fairness rule. One network can register **8** push endpoints on a topic: an IPv6
+`/64`, or a single IPv4 address. Refreshing an endpoint already on the topic is
+not a new slot. When a cap is hit the `429` carries `RateLimit` /
+`RateLimit-Policy` (draft-ietf-httpapi-ratelimit-headers) and deliberately does
+**not** carry `Retry-After` — waiting does not free a slot, unsubscribing a
+device does. Unsubscribe a device rather than retrying the POST in a minute.
+
+The Worker reads `CF-Connecting-IP` (set by Cloudflare, not spoofable by the
+client) and ignores `X-Forwarded-For`. Local `wrangler dev` has no
+`CF-Connecting-IP`, so the per-network cap is skipped there but the 1000 topic
+cap still applies — don't "fix" local dev by trusting a forwarded header.
 
 ### Origin budget
 

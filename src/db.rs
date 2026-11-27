@@ -119,7 +119,80 @@ pub async fn count_push_subscriptions(db: &D1Database, topic: &str) -> Result<u3
     Ok(result.unwrap_or(0))
 }
 
+/// Row shape for the existence lookup in #62: whether a (topic, endpoint) row
+/// exists and, if so, the `prefix_hash` it was registered under. `prefix_hash`
+/// is `None` for grandfathered rows (registered before the column existed) and
+/// for rows created while `CF-Connecting-IP` was absent.
+#[derive(serde::Deserialize)]
+struct PrefixHashRow {
+    prefix_hash: Option<String>,
+}
+
+/// `Ok(None)` when no such row exists; `Ok(Some(None))` when the row exists but
+/// its `prefix_hash` is NULL (grandfathered); `Ok(Some(Some(hash)))` otherwise.
+pub async fn get_push_subscription_prefix_hash(
+    db: &D1Database,
+    topic: &str,
+    endpoint: &str,
+) -> Result<Option<Option<String>>> {
+    let stmt = db.prepare(
+        "SELECT prefix_hash FROM push_subscriptions WHERE topic = ?1 AND endpoint = ?2 LIMIT 1",
+    );
+    let result = stmt
+        .bind(&[JsValue::from_str(topic), JsValue::from_str(endpoint)])?
+        .first::<PrefixHashRow>(None)
+        .await?;
+    Ok(result.map(|r| r.prefix_hash))
+}
+
+/// Number of subscription rows on one topic that carry `prefix_hash`. Only
+/// non-NULL hashes count toward the per-network cap (#62); grandfathered NULL
+/// rows count toward the topic cap of 1000 and toward no prefix.
+pub async fn count_push_subscriptions_by_prefix(
+    db: &D1Database,
+    topic: &str,
+    prefix_hash: &str,
+) -> Result<u32> {
+    let stmt = db.prepare(
+        "SELECT COUNT(*) as count FROM push_subscriptions WHERE topic = ?1 AND prefix_hash = ?2",
+    );
+    let result = stmt
+        .bind(&[JsValue::from_str(topic), JsValue::from_str(prefix_hash)])?
+        .first::<u32>(Some("count"))
+        .await?;
+    Ok(result.unwrap_or(0))
+}
+
 pub async fn insert_push_subscription(
+    db: &D1Database,
+    topic: &str,
+    endpoint: &str,
+    p256dh: &str,
+    auth: &str,
+    created_at: i64,
+    prefix_hash: Option<&str>,
+) -> Result<()> {
+    let stmt = db.prepare(
+        "INSERT INTO push_subscriptions (topic, endpoint, p256dh, auth, created_at, prefix_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    );
+    stmt.bind(&[
+        JsValue::from_str(topic),
+        JsValue::from_str(endpoint),
+        JsValue::from_str(p256dh),
+        JsValue::from_str(auth),
+        JsValue::from(created_at as f64),
+        prefix_hash.map_or(JsValue::NULL, JsValue::from_str),
+    ])?
+    .run()
+    .await?;
+    Ok(())
+}
+
+/// Refresh the keys of an endpoint already on the topic (#62). `prefix_hash`
+/// is deliberately untouched: a re-POST is a refresh, not a new slot, and it
+/// must not move the row between network buckets.
+pub async fn update_push_subscription_keys(
     db: &D1Database,
     topic: &str,
     endpoint: &str,
@@ -128,15 +201,15 @@ pub async fn insert_push_subscription(
     created_at: i64,
 ) -> Result<()> {
     let stmt = db.prepare(
-        "INSERT OR REPLACE INTO push_subscriptions (topic, endpoint, p256dh, auth, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "UPDATE push_subscriptions SET p256dh = ?1, auth = ?2, created_at = ?3
+         WHERE topic = ?4 AND endpoint = ?5",
     );
     stmt.bind(&[
-        JsValue::from_str(topic),
-        JsValue::from_str(endpoint),
         JsValue::from_str(p256dh),
         JsValue::from_str(auth),
         JsValue::from(created_at as f64),
+        JsValue::from_str(topic),
+        JsValue::from_str(endpoint),
     ])?
     .run()
     .await?;
