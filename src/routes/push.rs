@@ -27,6 +27,23 @@ pub async fn vapid_key(_req: Request, ctx: RouteContext<Context>) -> Result<Resp
     Response::ok(key)
 }
 
+/// Per-network, per-topic Web Push slot cap (#62). A /64 prefix (or a full
+/// IPv4 address) may hold this many subscriptions on one topic; the topic-wide
+/// ceiling of 1000 is the ceiling, not the fairness rule.
+const MAX_PER_NETWORK: u32 = 8;
+const MAX_PER_TOPIC: u32 = 1000;
+
+/// `RateLimit-Policy` structured field (draft-ietf-httpapi-ratelimit-headers):
+/// a stock of `quota` "subscriptions" items.
+fn rate_limit_policy(quota: u32) -> String {
+    format!("\"subscriptions\";q={};qu=\"items\"", quota)
+}
+
+/// `RateLimit` structured field: `remaining` new slots left in the stock.
+fn rate_limit(remaining: u32) -> String {
+    format!("\"subscriptions\";r={}", remaining)
+}
+
 pub async fn subscribe(mut req: Request, ctx: RouteContext<Context>) -> Result<Response> {
     let topic = ctx.param("topic").unwrap().to_string();
     validate_topic(&topic)?;
@@ -40,12 +57,62 @@ pub async fn subscribe(mut req: Request, ctx: RouteContext<Context>) -> Result<R
     }
     let d1 = ctx.d1("DB")?;
 
-    let count = db::count_push_subscriptions(&d1, &topic).await?;
-    if count >= 1000 {
-        return Response::error("Too Many Requests: max subscriptions reached for topic", 429);
-    }
+    // The fairness bucket comes from CF-Connecting-IP only (#62, ntfy 2.38.2):
+    // Cloudflare sets it, a client cannot. X-Forwarded-For / X-Real-IP /
+    // True-Client-IP are deliberately not read — the first forwarded-for line
+    // is attacker-controlled once anything in front of us appends instead of
+    // replaces. Missing header (local `wrangler dev`) skips the per-network cap
+    // but never the topic cap.
+    let connecting_ip = req.headers().get("CF-Connecting-IP")?;
+    let prefix_hash = connecting_ip.as_deref().and_then(crate::models::prefix_hash);
 
     let now = (Date::now().as_millis() / 1000) as i64;
+
+    // A re-POST of an endpoint already on the topic is a refresh, not a new
+    // slot: update the keys, keep the existing prefix_hash, and return 200 even
+    // when this network is already at its cap or the topic is at 1000.
+    let existing = db::get_push_subscription_prefix_hash(&d1, &topic, &body.endpoint).await?;
+    if let Some(existing_hash) = existing {
+        db::update_push_subscription_keys(
+            &d1,
+            &topic,
+            &body.endpoint,
+            &body.keys.p256dh,
+            &body.keys.auth,
+            now,
+        )
+        .await?;
+        let resp = Response::ok("subscribed")?;
+        if let Some(hash) = existing_hash {
+            let net_count = db::count_push_subscriptions_by_prefix(&d1, &topic, &hash).await?;
+            resp.headers()
+                .set("RateLimit", &rate_limit(MAX_PER_NETWORK.saturating_sub(net_count)))?;
+        }
+        // A grandfathered NULL hash has no prefix to report; RateLimit is
+        // omitted and does not change.
+        return Ok(resp);
+    }
+
+    // New endpoint: the topic cap is the ceiling, then the per-network cap.
+    let count = db::count_push_subscriptions(&d1, &topic).await?;
+    if count >= MAX_PER_TOPIC {
+        let resp =
+            Response::error("Too Many Requests: max subscriptions reached for topic", 429)?;
+        resp.headers().set("RateLimit-Policy", &rate_limit_policy(MAX_PER_TOPIC))?;
+        resp.headers().set("RateLimit", &rate_limit(0))?;
+        return Ok(resp);
+    }
+    if let Some(hash) = prefix_hash.as_deref() {
+        let net_count = db::count_push_subscriptions_by_prefix(&d1, &topic, hash).await?;
+        if net_count >= MAX_PER_NETWORK {
+            let resp =
+                Response::error("Too Many Requests: max subscriptions for this network", 429)?;
+            resp.headers().set("RateLimit-Policy", &rate_limit_policy(MAX_PER_NETWORK))?;
+            resp.headers().set("RateLimit", &rate_limit(0))?;
+            return Ok(resp);
+        }
+    }
+
     db::insert_push_subscription(
         &d1,
         &topic,
@@ -53,10 +120,17 @@ pub async fn subscribe(mut req: Request, ctx: RouteContext<Context>) -> Result<R
         &body.keys.p256dh,
         &body.keys.auth,
         now,
+        prefix_hash.as_deref(),
     )
     .await?;
 
-    Response::ok("subscribed")
+    let resp = Response::ok("subscribed")?;
+    if let Some(hash) = prefix_hash {
+        let net_count = db::count_push_subscriptions_by_prefix(&d1, &topic, &hash).await?;
+        resp.headers()
+            .set("RateLimit", &rate_limit(MAX_PER_NETWORK.saturating_sub(net_count)))?;
+    }
+    Ok(resp)
 }
 
 pub async fn unsubscribe(mut req: Request, ctx: RouteContext<Context>) -> Result<Response> {

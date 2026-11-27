@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use worker::{Error, Result, Url};
 
 pub fn validate_topic(topic: &str) -> Result<()> {
@@ -89,6 +90,39 @@ pub fn is_apple_push_endpoint(endpoint: &str) -> bool {
             .unwrap_or(false),
         Err(_) => false,
     }
+}
+
+/// The fairness bucket for a client address taken from `CF-Connecting-IP`
+/// (#62). IPv6 is bucketed to its /64 prefix (the first four hextets,
+/// zero-compressed); IPv4 is bucketed per full address — two IPv4 addresses are
+/// different buckets even when they share a /24. Returns `None` when the header
+/// is missing or unparseable (local `wrangler dev` has no such header): the
+/// caller skips the per-network cap but still applies the topic cap.
+pub fn network_prefix(ip: &str) -> Option<String> {
+    match ip.trim().parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let s = v6.segments();
+            Some(format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3]))
+        }
+        Ok(std::net::IpAddr::V4(v4)) => Some(v4.to_string()),
+        Err(_) => None,
+    }
+}
+
+/// sha256 of the network prefix, hex-encoded. Only this hash is stored in D1 —
+/// never the raw address and never the endpoint — same rule as `endpoint_hash`
+/// on receipts. The hash is a credential, not a log: no API returns it.
+pub fn prefix_hash(ip: &str) -> Option<String> {
+    network_prefix(ip).map(|p| {
+        let mut hasher = Sha256::new();
+        hasher.update(p.as_bytes());
+        let digest = hasher.finalize();
+        let mut hex = String::with_capacity(64);
+        for b in digest {
+            hex.push_str(&format!("{:02x}", b));
+        }
+        hex
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +224,48 @@ mod tests {
         // Subtags are capped at 8 alphanumeric chars.
         assert!(!valid_language_tag("en-abcdefghi"));
         assert!(valid_language_tag("en-abcdefgh"));
+    }
+
+    #[test]
+    fn network_prefix_buckets_ipv6_to_64_and_ipv4_to_full_address() {
+        // Two addresses that differ only in the last 64 bits share a prefix.
+        let a = network_prefix("2001:db8:1:2:1111:2222:3333:4444").unwrap();
+        let b = network_prefix("2001:db8:1:2:aaaa:bbbb:cccc:dddd").unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, "2001:db8:1:2::/64");
+        // A different /64 is a different bucket.
+        let c = network_prefix("2001:db8:1:3::1").unwrap();
+        assert_ne!(a, c);
+        // Leading-zero compression is canonical so the same /64 hashes equal.
+        assert_eq!(
+            network_prefix("2001:0db8:0001:0002::5").unwrap(),
+            network_prefix("2001:db8:1:2::6").unwrap()
+        );
+        // IPv4 is per full address — a shared /24 does NOT share a bucket.
+        assert_eq!(network_prefix("192.0.2.7").unwrap(), "192.0.2.7");
+        assert_ne!(
+            network_prefix("192.0.2.7").unwrap(),
+            network_prefix("192.0.2.8").unwrap()
+        );
+    }
+
+    #[test]
+    fn network_prefix_rejects_missing_or_garbage() {
+        assert_eq!(network_prefix(""), None);
+        assert_eq!(network_prefix("not an ip"), None);
+        assert_eq!(network_prefix("999.1.1.1"), None);
+        assert_eq!(network_prefix("  "), None);
+    }
+
+    #[test]
+    fn prefix_hash_is_stable_sha256_hex_and_never_the_address() {
+        let h = prefix_hash("2001:db8:1:2::1").unwrap();
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(h, prefix_hash("2001:db8:1:2::1").unwrap());
+        assert_ne!(h, prefix_hash("2001:db8:1:3::1").unwrap());
+        assert!(!h.contains("2001"), "the hash must not embed the address");
+        assert_eq!(prefix_hash("garbage"), None);
     }
 
     #[test]

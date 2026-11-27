@@ -3,7 +3,7 @@ pub mod vapid;
 
 use sha2::{Digest, Sha256};
 use worker::*;
-use worker::wasm_bindgen::JsValue;
+use worker::wasm_bindgen::{JsCast, JsValue};
 
 use crate::db;
 use crate::models::{is_apple_push_endpoint, validate_push_endpoint, Message, PushSubscriptionRecord};
@@ -16,6 +16,9 @@ enum PushError {
     PayloadTooLarge,
     HttpStatus(u16),
     Worker(worker::Error),
+    /// We stopped waiting: the per-endpoint clock fired and we aborted the
+    /// fetch before the push service answered. Not a deletion, not a rejection.
+    Timeout,
 }
 
 /// Maximum plaintext bytes (after RFC 8291 decrypt) we will send to a push
@@ -26,6 +29,17 @@ enum PushError {
 pub const PUSH_PAYLOAD_MAX_BYTES: usize = 3500;
 const MESSAGE_TRUNCATE_BYTES: usize = 240;
 const TITLE_TRUNCATE_BYTES: usize = 120;
+
+/// #62 fan-out clocks. Per endpoint: five seconds is enough for a slow TLS
+/// handshake and not enough to pin the isolate. Whole fan-out: `waitUntil` dies
+/// at 30s; receipt writes and the generic-payload retry need the remainder, so
+/// a fan-out still going at 20s stops starting new posts.
+const PER_ENDPOINT_TIMEOUT_SECS: u64 = 5;
+const FANOUT_DEADLINE_SECS: i64 = 20;
+/// Posts in flight at once. Unbounded parallelism spends the subrequest budget
+/// in one tick; a serial loop lets one stall block the rest. Eight is the same
+/// as the per-network slot cap, so an in-cap topic finishes in one wave.
+const MAX_IN_FLIGHT: usize = 8;
 
 /// Load the subscriptions a publish will attempt, pruning rows whose endpoint
 /// is no longer on the push-service allowlist (defence in depth: rows inserted
@@ -79,82 +93,87 @@ pub async fn send_push_to_topic(
     let payload = push_payload(msg, public_origin.as_deref());
 
     let total = subscriptions.len();
-    for (i, sub) in subscriptions.iter().enumerate() {
-        // One attempt per endpoint. A 429 arms the origin pause and stops the
-        // rest of this fan-out (#61); every other outcome only writes its
-        // receipt, exactly as before.
-        let throttled = match send_single_push(
-            &sub.endpoint,
-            &sub.p256dh,
-            &sub.auth,
-            &payload,
-            &vapid_private_key,
-            &vapid_public_key,
-            &vapid_subject,
-            msg.priority,
-            &msg.topic,
+    let start_ms = Date::now().as_millis() as i64;
+    let deadline_ms = start_ms + FANOUT_DEADLINE_SECS * 1000;
+
+    // Fan out in waves of at most MAX_IN_FLIGHT concurrent posts (#62). Each
+    // endpoint writes exactly one receipt; the scheduler only reacts to a 429
+    // (#61: stop the rest of this fan-out) and to the 20-second wall clock.
+    let mut next = 0usize;
+    let mut deadline_hit = false;
+    while next < total {
+        if Date::now().as_millis() as i64 >= deadline_ms {
+            deadline_hit = true;
+            break;
+        }
+        let end = usize::min(next + MAX_IN_FLIGHT, total);
+
+        let promises = js_sys::Array::new();
+        for sub in &subscriptions[next..end] {
+            let env = env.clone();
+            let msg = msg.clone();
+            let sub = sub.clone();
+            let payload = payload.clone();
+            let vapid_private_key = vapid_private_key.clone();
+            let vapid_public_key = vapid_public_key.clone();
+            let vapid_subject = vapid_subject.clone();
+            let promise = worker::wasm_bindgen_futures::future_to_promise(async move {
+                let outcome = match env.d1("DB") {
+                    Ok(db) => deliver_one(
+                        &db,
+                        &msg,
+                        &sub,
+                        &payload,
+                        &vapid_private_key,
+                        &vapid_public_key,
+                        &vapid_subject,
+                        deadline_ms,
+                    )
+                    .await,
+                    Err(e) => {
+                        console_log!("Fan-out: D1 unavailable: {:?}", e);
+                        DeliveryOutcome::Ok
+                    }
+                };
+                let code = if outcome == DeliveryOutcome::Throttled {
+                    1.0
+                } else {
+                    0.0
+                };
+                Ok::<JsValue, JsValue>(JsValue::from_f64(code))
+            });
+            promises.push(promise.as_ref());
+        }
+
+        let results = worker::wasm_bindgen_futures::JsFuture::from(
+            js_sys::Promise::all(promises.as_ref()),
         )
         .await
-        {
-            Ok(status) => {
-                write_receipt(&db, msg, sub, "accepted", Some(status as i64)).await;
-                false
+        .map_err(|e| worker::Error::JsError(
+            e.as_string().unwrap_or_else(|| "fan-out wave failed".into()),
+        ))?;
+        let arr: js_sys::Array = results.unchecked_into();
+        let mut throttled = 0i64;
+        for i in 0..arr.length() {
+            if arr.get(i).as_f64().unwrap_or(0.0) == 1.0 {
+                throttled += 1;
             }
-            Err(PushError::PayloadTooLarge) => {
-                // One retry with a tiny payload that cannot exceed the budget.
-                // 410 is the only status that prunes; a 413/400 size rejection
-                // keeps the subscription and the D1 row. The receipt records the
-                // retry's outcome — one attempt, one row, until #55 upserts.
-                console_log!(
-                    "Push payload too large for {}; retrying with generic payload",
-                    &sub.endpoint
-                );
-                let generic = generic_retry_payload(msg);
-                match send_single_push(
-                    &sub.endpoint,
-                    &sub.p256dh,
-                    &sub.auth,
-                    &generic,
-                    &vapid_private_key,
-                    &vapid_public_key,
-                    &vapid_subject,
-                    msg.priority,
-                    &msg.topic,
-                )
-                .await
-                {
-                    Ok(status) => {
-                        write_receipt(&db, msg, sub, "accepted", Some(status as i64)).await;
-                        false
-                    }
-                    Err(e) => {
-                        let is_429 = matches!(&e, PushError::HttpStatus(429));
-                        handle_push_error(&db, msg, sub, e).await;
-                        is_429
-                    }
-                }
-            }
-            Err(e) => {
-                let is_429 = matches!(&e, PushError::HttpStatus(429));
-                handle_push_error(&db, msg, sub, e).await;
-                is_429
-            }
-        };
+        }
+        next = end;
 
-        if throttled {
-            // The push service just told the origin to stop (#61): the
-            // throttled receipt is already written above. Do not post the
-            // remaining endpoints of this fan-out, and arm a short origin
-            // pause. Per-endpoint escalation is #42's; this pause is only
-            // "stop for a minute".
+        if throttled > 0 {
+            // The push service told the origin to stop (#61): the throttled
+            // receipts are already written by the wave. Do not post the
+            // remaining endpoints, and arm a short origin pause. Per-endpoint
+            // escalation is #42's; this pause is only "stop for a minute".
             let now = (Date::now().as_millis() / 1000) as i64;
-            let remaining = (total - i - 1) as i64;
+            let remaining = (total - next) as i64;
             if remaining > 0 {
                 if let Err(e) = db::reconcile_push_budget_skip(&db, day, remaining).await {
                     console_log!("Push budget reconcile failed: {:?}", e);
                 }
             }
-            if let Err(e) = db::add_push_budget_throttled(&db, day, 1).await {
+            if let Err(e) = db::add_push_budget_throttled(&db, day, throttled).await {
                 console_log!("Push budget throttled failed: {:?}", e);
             }
             if let Err(e) =
@@ -166,10 +185,110 @@ pub async fn send_push_to_topic(
         }
     }
 
+    if deadline_hit {
+        // The 20-second clock fired first: do not start the remaining endpoints.
+        // Each one not started gets the same `timeout` receipt, http_status
+        // null — a missing row would read as "still in flight". The message is
+        // in D1; a later publish or a poll is how they catch up (#62).
+        for sub in &subscriptions[next..] {
+            write_receipt(&db, msg, sub, "timeout", None).await;
+        }
+    }
+
     Ok(())
 }
 
-/// Map a push-service outcome to one of the five receipt status words. This is
+/// One endpoint of the fan-out, run concurrently with up to 7 others (#62).
+/// Writes exactly one receipt and prunes on 410/404; returns whether the push
+/// service throttled the origin (a 429 that must stop the rest of the fan-out).
+async fn deliver_one(
+    db: &worker::D1Database,
+    msg: &Message,
+    sub: &PushSubscriptionRecord,
+    payload: &[u8],
+    vapid_private_key: &str,
+    vapid_public_key: &str,
+    vapid_subject: &str,
+    deadline_ms: i64,
+) -> DeliveryOutcome {
+    let throttled = match send_single_push(
+        &sub.endpoint,
+        &sub.p256dh,
+        &sub.auth,
+        payload,
+        vapid_private_key,
+        vapid_public_key,
+        vapid_subject,
+        msg.priority,
+        &msg.topic,
+    )
+    .await
+    {
+        Ok(status) => {
+            write_receipt(db, msg, sub, "accepted", Some(status as i64)).await;
+            false
+        }
+        Err(PushError::PayloadTooLarge) => {
+            // One retry with a tiny payload that cannot exceed the budget. The
+            // retry gets its own 5-second clock (inside send_single_push) and
+            // does not reset the 20-second fan-out clock: if that clock has
+            // already fired, skip the retry and record the first outcome (#62).
+            if Date::now().as_millis() as i64 >= deadline_ms {
+                handle_push_error(db, msg, sub, PushError::PayloadTooLarge).await;
+                false
+            } else {
+                console_log!(
+                    "Push payload too large for {}; retrying with generic payload",
+                    &sub.endpoint
+                );
+                let generic = generic_retry_payload(msg);
+                match send_single_push(
+                    &sub.endpoint,
+                    &sub.p256dh,
+                    &sub.auth,
+                    &generic,
+                    vapid_private_key,
+                    vapid_public_key,
+                    vapid_subject,
+                    msg.priority,
+                    &msg.topic,
+                )
+                .await
+                {
+                    Ok(status) => {
+                        write_receipt(db, msg, sub, "accepted", Some(status as i64)).await;
+                        false
+                    }
+                    Err(e) => {
+                        let is_429 = matches!(&e, PushError::HttpStatus(429));
+                        handle_push_error(db, msg, sub, e).await;
+                        is_429
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let is_429 = matches!(&e, PushError::HttpStatus(429));
+            handle_push_error(db, msg, sub, e).await;
+            is_429
+        }
+    };
+
+    if throttled {
+        DeliveryOutcome::Throttled
+    } else {
+        DeliveryOutcome::Ok
+    }
+}
+
+/// What one endpoint's delivery means to the fan-out scheduler.
+#[derive(Clone, Copy, PartialEq)]
+enum DeliveryOutcome {
+    Ok,
+    Throttled,
+}
+
+/// Map a push-service outcome to one of the six receipt status words. This is
 /// the contract; no other word may be stored.
 fn receipt_status(err: &PushError) -> &'static str {
     match err {
@@ -178,6 +297,7 @@ fn receipt_status(err: &PushError) -> &'static str {
         PushError::HttpStatus(429) | PushError::HttpStatus(503) => "throttled",
         PushError::HttpStatus(_) => "rejected",
         PushError::Worker(_) => "rejected",
+        PushError::Timeout => "timeout",
     }
 }
 
@@ -190,6 +310,7 @@ fn error_http_status(err: &PushError) -> Option<i64> {
         PushError::PayloadTooLarge => Some(413),
         PushError::HttpStatus(s) => Some(*s as i64),
         PushError::Worker(_) => None,
+        PushError::Timeout => None,
     }
 }
 
@@ -264,6 +385,12 @@ async fn handle_push_error(
         }
         PushError::Worker(e) => {
             console_log!("Web Push error for {}: {:?}", sub.endpoint, e);
+        }
+        PushError::Timeout => {
+            // The per-endpoint clock fired and we aborted the fetch. The row
+            // stays; only 410/404 prune. The receipt below is "timeout" with no
+            // http_status.
+            console_log!("Web Push timed out for {}", sub.endpoint);
         }
     }
 
@@ -580,12 +707,43 @@ async fn send_single_push(
         .with_body(Some(JsValue::from(body)));
 
     let req = Request::new_with_init(endpoint, &init).map_err(PushError::Worker)?;
-    let mut resp = Fetch::Request(req).send().await.map_err(PushError::Worker)?;
+
+    // Per-endpoint deadline (#62). A slow or unresponsive push service must
+    // not pin the fan-out: race the fetch against a 5-second timer and abort
+    // when the timer wins. The abort signal is the only thing that aborts this
+    // controller, so `signal.aborted()` cleanly tells a timeout apart from a
+    // network error (which must stay `rejected`, never `timeout`).
+    let controller = worker::web_sys::AbortController::new().map_err(|_| {
+        PushError::Worker(worker::Error::RustError(
+            "could not create AbortController".into(),
+        ))
+    })?;
+    let signal = worker::AbortSignal::from(controller.signal());
+    {
+        let controller = controller.clone();
+        worker::wasm_bindgen_futures::spawn_local(async move {
+            worker::Delay::from(std::time::Duration::from_secs(PER_ENDPOINT_TIMEOUT_SECS)).await;
+            controller.abort();
+        });
+    }
+
+    let mut resp = match Fetch::Request(req).send_with_signal(&signal).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            if signal.aborted() {
+                return Err(PushError::Timeout);
+            }
+            return Err(PushError::Worker(e));
+        }
+    };
+
     let status = resp.status_code();
     if status == 410 {
+        let _ = resp.text().await; // release the body before the next post
         return Err(PushError::Gone);
     }
     if status == 404 {
+        let _ = resp.text().await;
         return Err(PushError::NotFound);
     }
     if status >= 400 {
@@ -596,6 +754,9 @@ async fn send_single_push(
         }
         return Err(PushError::HttpStatus(status));
     }
+    // Success path: drop the body before the next post. An unread body holds
+    // the subrequest open until the isolate dies (#62, ntfy 2.38.1).
+    let _ = resp.text().await;
     console_log!("Push sent successfully (status {})", status);
     Ok(status)
 }
@@ -831,6 +992,18 @@ mod tests {
         assert_eq!(receipt_status(&PushError::HttpStatus(401)), "rejected");
         assert_eq!(receipt_status(&PushError::HttpStatus(403)), "rejected");
         assert_eq!(receipt_status(&PushError::HttpStatus(500)), "rejected");
+        // A timeout we fired is its own word (#62), never "rejected" — a
+        // publisher seeing "rejected" may rotate a key that is not the problem.
+        assert_eq!(receipt_status(&PushError::Timeout), "timeout");
+        assert_eq!(receipt_status(&PushError::Worker(worker::Error::RustError("x".into()))), "rejected");
+    }
+
+    #[test]
+    fn timeout_has_no_http_status() {
+        assert_eq!(error_http_status(&PushError::Timeout), None);
+        assert_eq!(error_http_status(&PushError::Gone), Some(410));
+        assert_eq!(error_http_status(&PushError::HttpStatus(401)), Some(401));
+        assert_eq!(error_http_status(&PushError::Worker(worker::Error::RustError("x".into()))), None);
     }
 
     #[test]
